@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { YearMark } from "./engine.ts";
-import { chartRows, latestGap, statuteGroups } from "./trends.ts";
+import { bookChartRows, chartRows, latestGap, statuteGroups } from "./trends.ts";
 
 function mark(year: number, unemployment: number): YearMark {
   return {
@@ -45,4 +45,20 @@ test("statutes group by year, newest first", () => {
   ]);
   assert.equal(groups[0]!.year, 5);
   assert.deepEqual(groups[1]!.labels, ["Automation began · Harbor", "Tax cut to low"]);
+});
+
+
+test("books chart skips the opening census surplus", () => {
+  const history: YearMark[] = [
+    { ...mark(1, 0.06), taxRevenue: 424_000_000, spending: 0 },
+    { ...mark(2, 0.07), taxRevenue: 425_000_000, spending: 424_000_000 },
+    { ...mark(3, 0.08), taxRevenue: 420_000_000, spending: 426_000_000 },
+  ];
+  const rows = bookChartRows(history);
+  assert.deepEqual(
+    rows.map((row) => row.year),
+    [2, 3],
+  );
+  assert.equal(rows[0]!.income, 425_000_000);
+  assert.equal(rows[0]!.expenses, 424_000_000);
 });

@@ -11,7 +11,7 @@ import {
 } from "recharts";
 import type { Ledger, StatuteEvent } from "@/lib/sim/engine";
 import { formatInt, formatMarks, formatPct, formatSignedInt, formatSignedMarks, formatSignedPoints, formatSignedPp } from "@/lib/sim/format";
-import { chartRows, latestGap, statuteGroups, type SeriesId } from "@/lib/sim/trends";
+import { bookChartRows, chartRows, latestGap, statuteGroups, type SeriesId } from "@/lib/sim/trends";
 
 const SERIES: readonly { id: SeriesId; label: string; stroke: string }[] = [
   { id: "unemployment", label: "Unemployment", stroke: "var(--color-coral)" },
@@ -110,10 +110,10 @@ export function Trends({ ledger }: { ledger: Ledger }) {
   const books = series.id === "books";
   const plotted: SeriesId = series.id === "avgWage" && wageView === "person" ? "wagePerCapita" : series.id;
   const rows = books ? [] : chartRows(ledger.history, ledger.pace, plotted);
-  const bookRows = ledger.history.map((mark) => ({
+  const bookRows = bookChartRows(ledger.history).map((mark) => ({
     year: String(mark.year),
-    income: mark.taxRevenue,
-    expenses: mark.spending,
+    income: mark.income,
+    expenses: mark.expenses,
   }));
   const gap = books ? null : latestGap(rows, ledger.pace);
   const phrase = gap == null ? null : gapPhrase(plotted, gap);

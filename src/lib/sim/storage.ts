@@ -1,4 +1,5 @@
 import {
+  asOwnership,
   ensureTrail,
   type Gates,
   type Ledger,
@@ -55,16 +56,29 @@ function isTechState(value: unknown): value is TechState {
 }
 
 function isPolicies(value: unknown): value is Policies {
-  if (!isRecord(value)) return false;
-  return (
-    TAX.includes(value.tax as TaxBand) &&
-    GATES.includes(value.gates as Gates) &&
-    typeof value.stipend === "boolean" &&
-    typeof value.dividend === "boolean" &&
-    typeof value.works === "boolean" &&
-    typeof value.retrain === "boolean" &&
-    typeof value.wageFloor === "boolean"
-  );
+  return asPolicies(value) !== null;
+}
+
+/** Accept a policy block, filling in a safe ownership default when it is missing or damaged. */
+export function asPolicies(value: unknown): Policies | null {
+  if (!isRecord(value)) return null;
+  if (!TAX.includes(value.tax as TaxBand)) return null;
+  if (!GATES.includes(value.gates as Gates)) return null;
+  if (typeof value.stipend !== "boolean") return null;
+  if (typeof value.dividend !== "boolean") return null;
+  if (typeof value.works !== "boolean") return null;
+  if (typeof value.retrain !== "boolean") return null;
+  if (typeof value.wageFloor !== "boolean") return null;
+  return {
+    tax: value.tax as TaxBand,
+    gates: value.gates as Gates,
+    stipend: value.stipend,
+    dividend: value.dividend,
+    works: value.works,
+    retrain: value.retrain,
+    wageFloor: value.wageFloor,
+    ownership: asOwnership(value.ownership),
+  };
 }
 
 export function isLedger(value: unknown): value is Ledger {
@@ -155,13 +169,17 @@ export function reviveLedger(parsed: unknown): Ledger | null {
     enactedTech?: unknown;
   };
   const shadow = loose.shadow && isLedger(loose.shadow) ? { ...loose.shadow, shadow: null, pace: null } : null;
+  const policies = asPolicies(migrated.policies);
+  if (!policies) return null;
+  const enacted = asPolicies(loose.enacted) ?? undefined;
   return ensureTrail({
     ...migrated,
+    policies,
     history: Array.isArray(loose.history) && loose.history.every(isYearMark) ? loose.history : [],
     events: Array.isArray(loose.events) && loose.events.every(isEvent) ? loose.events : [],
     shadow,
     pace: shadow && Array.isArray(loose.pace) && loose.pace.every(isYearMark) ? loose.pace : null,
-    enacted: isPolicies(loose.enacted) ? loose.enacted : undefined,
+    enacted,
     enactedTech: isFlagMap(loose.enactedTech) ? loose.enactedTech : undefined,
   });
 }
@@ -184,7 +202,9 @@ export function saveLedger(ledger: Ledger): void {
   }
 }
 
+// Spelled this way in v1; also read the corrected key so a later rename does not drop saves.
 const SAVES_KEY = "terkerderr-saves-v1";
+const SAVES_KEY_ALIAS = "terkerder-saves-v1";
 export const MAX_SAVES = 8;
 
 export type CitySave = {
@@ -228,7 +248,9 @@ function asSaves(raw: string | null): CitySave[] {
 
 export function loadSaves(): CitySave[] {
   try {
-    return asSaves(localStorage.getItem(SAVES_KEY));
+    const primary = asSaves(localStorage.getItem(SAVES_KEY));
+    if (primary.length > 0) return primary;
+    return asSaves(localStorage.getItem(SAVES_KEY_ALIAS));
   } catch {
     return [];
   }

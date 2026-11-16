@@ -46,7 +46,6 @@ import {
   utilityJobs,
   worksJobCount,
   type Gates,
-  type Ownership,
   type Ledger,
   type Policies,
   type SectorId,
@@ -188,6 +187,11 @@ export function Dashboard() {
     setSaves(loadSaves());
     setPendingLoad(null);
     setSavesOpen(true);
+  }
+
+  function closeSaves() {
+    setSavesOpen(false);
+    setPendingLoad(null);
   }
 
   function setPolicy<K extends keyof Policies>(key: K, value: Policies[K]) {
@@ -556,26 +560,37 @@ export function Dashboard() {
 
       {savesOpen ? (
         <div
-          className="safe-top safe-bottom fixed inset-0 z-30 flex flex-col bg-[#10141c] px-4"
+          className="safe-top safe-bottom fixed inset-0 z-30 flex flex-col overflow-hidden bg-[#10141c] px-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="saves-title"
+          data-testid="load-screen"
         >
-          <div className="mx-auto flex w-full max-w-md flex-1 flex-col">
-            <h2 id="saves-title" className="pt-6 text-3xl font-medium tracking-tight">
-              Load game
-            </h2>
-            <p className="mt-2 text-base text-muted-foreground">
+          <div className="mx-auto flex h-full min-h-0 w-full max-w-md flex-col">
+            <div className="flex shrink-0 items-start justify-between gap-3 pt-4">
+              <h2 id="saves-title" className="text-3xl font-medium tracking-tight">
+                Load game
+              </h2>
+              <button
+                type="button"
+                className="min-h-11 shrink-0 rounded-xl border border-border px-4 text-base font-semibold"
+                data-testid="load-back"
+                onClick={closeSaves}
+              >
+                Back
+              </button>
+            </div>
+            <p className="mt-2 shrink-0 text-base text-muted-foreground">
               {saves.length} of 8. Load one to put the city back, or start a new game. The city you are playing is not changed until you load.
             </p>
-            <div className="mt-4 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pb-3">
+            <div className="mt-4 flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overscroll-contain pb-3" data-testid="load-list">
               {saves.length === 0 ? (
                 <p className="rounded-xl border border-border bg-card px-4 py-4 text-base text-muted-foreground">
                   No saves yet. Use Save game before you try something risky.
                 </p>
               ) : (
                 saves.map((slot) => (
-                  <article key={slot.id} className="rounded-xl border border-border bg-card px-4 py-4">
+                  <article key={slot.id} className="rounded-xl border border-border bg-card px-4 py-4" data-testid="save-slot">
                     <p className="text-lg font-semibold">{slot.note || `Year ${slot.year}`}</p>
                     {slot.note ? <p className="text-sm text-muted-foreground">Year {slot.year}</p> : null}
                     <p className="mt-1 text-base tabular-nums">Reserve {formatMarks(slot.reserve)}</p>
@@ -634,26 +649,29 @@ export function Dashboard() {
                 ))
               )}
             </div>
-            <button
-              type="button"
-              className="min-h-14 rounded-xl border border-border bg-card text-base font-semibold"
-              onClick={() => {
-                setSavesOpen(false);
-                setConfirming(true);
-              }}
-            >
-              <span className="inline-flex items-center justify-center gap-2">
-                <RotateCcw className="size-5" strokeWidth={1.75} aria-hidden="true" />
-                New game
-              </span>
-            </button>
-            <button
-              type="button"
-              className="mt-2 mb-3 min-h-14 rounded-xl bg-accent text-base font-semibold text-accent-foreground"
-              onClick={() => setSavesOpen(false)}
-            >
-              Back to the city
-            </button>
+            <div className="shrink-0 pt-2">
+              <button
+                type="button"
+                className="min-h-14 w-full rounded-xl border border-border bg-card text-base font-semibold"
+                onClick={() => {
+                  closeSaves();
+                  setConfirming(true);
+                }}
+              >
+                <span className="inline-flex items-center justify-center gap-2">
+                  <RotateCcw className="size-5" strokeWidth={1.75} aria-hidden="true" />
+                  New game
+                </span>
+              </button>
+              <button
+                type="button"
+                className="mt-2 mb-3 min-h-14 w-full rounded-xl bg-accent text-base font-semibold text-accent-foreground"
+                data-testid="load-back-footer"
+                onClick={closeSaves}
+              >
+                Back to the city
+              </button>
+            </div>
           </div>
         </div>
       ) : null}

@@ -334,3 +334,113 @@ test("a city saved before charts still gains a trail", () => {
   assert.equal(next.history.length, 2);
   assert.ok(next.events.some((event) => event.label === "Automation began · Transport"));
 });
+
+test("staffed plant crews sit in a sector and count toward tax", () => {
+  const open = openingState();
+  sane(open);
+  assert.equal(
+    open.sectors.reduce((sum, sector) => sum + sector.employed, 0),
+    open.employed,
+  );
+  // Opening plants are on the books, not an invisible baseline of 40,600.
+  assert.ok(open.employed > 40_600, `opening employed ${open.employed}`);
+
+  const idle = advance(openingState());
+  const built = advance(stageService(openingState(), "waste", "crew"));
+  sane(built);
+  const wageBill = (state: Ledger, id: "government") => {
+    const sector = state.sectors.find((item) => item.id === id)!;
+    return sector.employed * sector.wage;
+  };
+  const idleGov = idle.sectors.find((sector) => sector.id === "government")!;
+  const builtGov = built.sectors.find((sector) => sector.id === "government")!;
+  assert.equal(
+    built.sectors.reduce((sum, sector) => sum + sector.employed, 0),
+    built.employed,
+  );
+  assert.ok(builtGov.employed > idleGov.employed, `government jobs ${builtGov.employed} vs ${idleGov.employed}`);
+  assert.ok(wageBill(built, "government") > wageBill(idle, "government"));
+});
+
+test("loan names stay unique past Z", () => {
+  let state = openingState();
+  for (let i = 0; i < 30; i += 1) state = borrow(state);
+  const names = state.loans.map((loan) => loan.name);
+  assert.equal(names.length, 30);
+  assert.equal(new Set(names).size, 30);
+  assert.ok(names.includes("Z"));
+  assert.ok(names.includes("AA"));
+  assert.ok(names.includes("AD"));
+});
+
+test("emergency borrowing covers a large deficit and unique names stay unique", () => {
+  const start = openingState("safety");
+  const broke = {
+    ...start,
+    treasury: -1_000_000_000,
+    policies: { ...start.policies, dividend: true, retrain: true },
+  };
+  const next = advance(broke);
+  assert.ok(next.loans.length >= 8, `loans ${next.loans.length}`);
+  assert.equal(new Set(next.loans.map((loan) => loan.name)).size, next.loans.length);
+  assert.ok(next.treasury > -1_000_000_000, `treasury ${next.treasury}`);
+  assert.ok(next.stability < 70, `stability ${next.stability}`);
+  assert.ok(next.events.some((event) => event.label === "Austerity"));
+});
+
+test("a deep deficit run hurts stability instead of holding near 90", () => {
+  let state = openingState("safety");
+  state = {
+    ...state,
+    policies: { ...state.policies, dividend: true, retrain: true, wageFloor: true },
+  };
+  for (let i = 0; i < 15; i += 1) {
+    for (const id of ["power", "water", "waste"] as const) {
+      if (state.works[id].staged === 0) state = stageService(state, id, "auto");
+    }
+    state = advance(state);
+  }
+  sane(state);
+  assert.ok(state.stability <= 55, `deficit stability ${state.stability}`);
+  assert.ok(state.debt > 400_000_000, `debt ${state.debt}`);
+  assert.equal(new Set(state.loans.map((loan) => loan.name)).size, state.loans.length);
+});
+
+test("mass automation without a safety net drops stability in the first live year", () => {
+  let bare = openingState();
+  let supported = openingState();
+  supported = { ...supported, policies: { ...supported.policies, stipend: true } };
+  const ids: TechId[] = [
+    "housing",
+    "transport",
+    "food",
+    "energy",
+    "services",
+    "government",
+    "health",
+    "education",
+    "law",
+  ];
+  for (const id of ids) {
+    bare = toggleTech(bare, id);
+    supported = toggleTech(supported, id);
+  }
+  const bareYear2 = advance(bare);
+  const heldYear2 = advance(supported);
+  sane(bareYear2);
+  assert.ok(bareYear2.unemployment > 0.15);
+  assert.ok(bareYear2.stability <= 65, `unsupported year-2 stability ${bareYear2.stability}`);
+  assert.ok(bareYear2.stability < 72);
+  assert.ok(heldYear2.stability > bareYear2.stability, `stipend ${heldYear2.stability} vs ${bareYear2.stability}`);
+});
+
+test("damaged ownership does not NaN the books", () => {
+  const damaged = {
+    ...openingState(),
+    policies: { ...openingState().policies, ownership: "nope" as Ledger["policies"]["ownership"] },
+  };
+  const next = advance(toggleTech(damaged, "food"));
+  assert.ok(Number.isFinite(next.taxRevenue), `tax ${next.taxRevenue}`);
+  assert.ok(Number.isFinite(next.treasury), `treasury ${next.treasury}`);
+  assert.equal(next.enacted.ownership, "firms");
+});

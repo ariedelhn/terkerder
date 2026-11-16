@@ -23,6 +23,13 @@ export const CITIZEN_PAYOUT = 0.45;
 
 export type Ownership = keyof typeof PROFIT_TAKE;
 
+export const OWNERSHIP_IDS: readonly Ownership[] = ["firms", "city", "citizens"];
+
+/** Missing or damaged ownership falls back to firms so the books stay numeric. */
+export function asOwnership(value: unknown): Ownership {
+  return value === "city" || value === "citizens" || value === "firms" ? value : "firms";
+}
+
 export const TAX_RATES = { low: 0.22, mid: 0.26, high: 0.31 } as const;
 
 export type TaxBand = keyof typeof TAX_RATES;
@@ -226,11 +233,22 @@ export function nextLoanRate(openLoans: number): number {
   return Math.round(raw * 10000) / 10000;
 }
 
+/** A, B, … Z, then AA, AB, and so on, so names never collide. */
+export function loanLetters(index: number): string {
+  let n = index;
+  let name = "";
+  do {
+    name = String.fromCharCode(65 + (n % 26)) + name;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return name;
+}
+
 function loanName(loans: CityLoan[]): string {
   const used = new Set(loans.map((loan) => loan.name));
-  let code = 65;
-  while (used.has(String.fromCharCode(code)) && code < 90) code += 1;
-  return String.fromCharCode(code);
+  let index = 0;
+  while (used.has(loanLetters(index))) index += 1;
+  return loanLetters(index);
 }
 
 export function makeLoan(loans: CityLoan[], principal = LOAN_SIZE): CityLoan {
@@ -934,6 +952,7 @@ function desiredSlots(
   techs: Record<TechId, TechState>,
   year: number,
   climate?: number,
+  works?: Works,
 ): number[] {
   const forces = yearForces(year);
   const cheap = clamp(1 - priceRatio(techs), 0, 0.45);
@@ -982,6 +1001,14 @@ function desiredSlots(
     ) {
       slots += (displacedJobs * absorb) / 3;
     }
+    // City plants are real jobs: power crews in energy, water and waste in government.
+    if (works) {
+      if (sector.id === "energy") slots += plantJobs("power", asPlant(works.power));
+      if (sector.id === "government") {
+        slots += plantJobs("water", asPlant(works.water));
+        slots += plantJobs("waste", asPlant(works.waste));
+      }
+    }
     return Math.max(0, slots * (climate ?? 1));
   });
 }
@@ -1020,6 +1047,7 @@ function project(args: {
   gentle: boolean;
   climate: number;
   serviceSpend: { services: number; interest: number; principal: number; construction: number };
+  works: Works;
 }): Project {
   const forces = yearForces(args.year);
   let participation = PARTICIPATION + forces.participation;
@@ -1040,7 +1068,7 @@ function project(args: {
 
   const ages = cityAges(args.pop, participation);
   const laborForce = Math.max(1, lookingCount(ages));
-  const wantedRaw = desiredSlots(args.pop, args.policies, args.techs, args.year, args.climate);
+  const wantedRaw = desiredSlots(args.pop, args.policies, args.techs, args.year, args.climate, args.works);
   const wanted = Math.round(sumOf(wantedRaw));
   const fillCap = Math.max(0, Math.round(laborForce * (1 - forces.friction)));
   const structuralTotal = Math.min(wanted, fillCap, laborForce);
@@ -1103,12 +1131,13 @@ function project(args: {
     humanBase += snap.employed * snap.wage * activity;
   }
   const band = args.policies.tax === "high" ? 1.12 : args.policies.tax === "low" ? 0.88 : 1;
-  const profitTax = Math.round(profit * PROFIT_TAKE[args.policies.ownership] * band);
+  const ownership = asOwnership(args.policies.ownership);
+  const profitTax = Math.round(profit * PROFIT_TAKE[ownership] * band);
   const taxRevenue = Math.round(humanBase * TAX_RATES[args.policies.tax]) + profitTax;
   const unemployed = Math.max(0, laborForce - employed);
   const costs = programCosts(args.pop, unemployed);
   let dividend = args.policies.dividend ? costs.dividend : 0;
-  if (args.policies.ownership === "citizens") dividend += Math.round(profit * CITIZEN_PAYOUT);
+  if (ownership === "citizens") dividend += Math.round(profit * CITIZEN_PAYOUT);
   const spend: SpendParts = {
     standing: costs.standing,
     stipend: args.policies.stipend ? costs.stipend : 0,
@@ -1195,6 +1224,7 @@ export function openingState(charter: CharterId = "census"): Ledger {
     gentle: false,
     climate: 1,
     serviceSpend: { services: 0, interest: 0, principal: 0, construction: 0 },
+    works: openingWorks(),
   });
   const openingWorksState = openingWorks();
   const openingCovers = coverOf(BASE_POP, census.employed, openingWorksState);
@@ -1337,8 +1367,8 @@ type TrailInput = Omit<
 /** Fill the trend trail for a city saved before charts existed. */
 export function ensureTrail(state: TrailInput): Ledger {
   const enactedRaw = state.enacted ?? (state.hasClosedYear ? state.policies : { ...NEUTRAL });
-  const policies = { ...state.policies, ownership: state.policies.ownership ?? "firms" };
-  const enacted = { ...enactedRaw, ownership: enactedRaw.ownership ?? policies.ownership };
+  const policies = { ...state.policies, ownership: asOwnership(state.policies.ownership) };
+  const enacted = { ...enactedRaw, ownership: asOwnership(enactedRaw.ownership ?? policies.ownership) };
   const enactedTech =
     state.enactedTech ?? (state.hasClosedYear ? enactedTechMap(state.techs) : blankTechFlags());
   const ages =
@@ -1383,7 +1413,7 @@ export function ensureTrail(state: TrailInput): Ledger {
     shadow: state.shadow
       ? {
           ...state.shadow,
-          policies: { ...state.shadow.policies, ownership: state.shadow.policies.ownership ?? "firms" },
+          policies: { ...state.shadow.policies, ownership: asOwnership(state.shadow.policies.ownership) },
           loans: shadowLoans,
           debt: debtOf(shadowLoans),
         }
@@ -1533,6 +1563,9 @@ export function prepay(state: Ledger, id: string, amount: number): Ledger {
   return { ...state, loans, debt: debtOf(loans), treasury: state.treasury - pay };
 }
 
+const MAX_EMERGENCY_LOANS_PER_YEAR = 8;
+const MAX_AUTO_LOANS = 10;
+
 function coverOverdraft(
   treasury: number,
   loans: CityLoan[],
@@ -1540,13 +1573,52 @@ function coverOverdraft(
   const taken: CityLoan[] = [];
   let cash = treasury;
   let book = loans;
-  while (cash < 0 && taken.length < 6) {
+  // Borrow enough to close a normal hole, but do not silently pile on unlimited debt.
+  while (cash < 0 && taken.length < MAX_EMERGENCY_LOANS_PER_YEAR && book.length < MAX_AUTO_LOANS) {
     const loan = makeLoan(book);
     book = [...book, loan];
     cash += LOAN_SIZE;
     taken.push(loan);
   }
   return { treasury: cash, loans: book, taken };
+}
+
+function spendTotal(spend: SpendParts): number {
+  return (
+    spend.standing +
+    spend.stipend +
+    spend.dividend +
+    spend.works +
+    spend.retrain +
+    spend.services +
+    spend.interest +
+    spend.principal +
+    spend.construction
+  );
+}
+
+/** Cut optional outlays when even emergency loans cannot close the books. */
+function trimDiscretionary(spend: SpendParts, need: number): { spend: SpendParts; cut: string[] } {
+  const next = { ...spend };
+  const cut: string[] = [];
+  let left = Math.max(0, need);
+  const order: readonly { key: keyof SpendParts; label: string }[] = [
+    { key: "construction", label: "Plant construction halted" },
+    { key: "dividend", label: "Dividend suspended" },
+    { key: "works", label: "Public works suspended" },
+    { key: "stipend", label: "Stipend suspended" },
+    { key: "retrain", label: "Retraining suspended" },
+  ];
+  for (const item of order) {
+    if (left <= 0) break;
+    const have = next[item.key];
+    if (have <= 0) continue;
+    const take = Math.min(have, left);
+    next[item.key] = have - take;
+    left -= take;
+    cut.push(item.label);
+  }
+  return { spend: next, cut };
 }
 
 function loansFromBalance(debt: number): CityLoan[] {
@@ -1558,16 +1630,6 @@ function loansFromBalance(debt: number): CityLoan[] {
     left -= principal;
   }
   return loans;
-}
-
-function applyUtilityJobs<T extends { employed: number; laborForce: number; unemployment: number }>(
-  econ: T,
-  works: Works,
-): T {
-  const extra = utilityJobs(works) - utilityJobs(openingWorks());
-  const employed = clamp(econ.employed + extra, 0, econ.laborForce);
-  const laborForce = Math.max(1, econ.laborForce);
-  return { ...econ, employed, unemployment: (laborForce - employed) / laborForce };
 }
 
 function settle(
@@ -1608,13 +1670,28 @@ function settle(
       principal: billed.principal,
       construction: book ? serviceCapex(state.works) : 0,
     },
+    works: builtWorks,
   });
-  const withCrews = applyUtilityJobs(econ, builtWorks);
+  let withCrews = econ;
   let treasury = state.treasury + withCrews.taxRevenue - withCrews.spending;
   let loans = billed.loans;
   const rescue = coverOverdraft(treasury, loans);
   treasury = rescue.treasury;
   loans = rescue.loans;
+  let openedPlants = opened;
+  let finalWorks = builtWorks;
+  let austerity: string[] = [];
+  if (treasury < 0) {
+    const trimmed = trimDiscretionary(withCrews.spend, -treasury);
+    austerity = trimmed.cut;
+    const cancelledBuild = withCrews.spend.construction > 0 && trimmed.spend.construction < withCrews.spend.construction;
+    if (cancelledBuild) {
+      finalWorks = state.works;
+      openedPlants = [];
+    }
+    withCrews = { ...withCrews, spend: trimmed.spend, spending: spendTotal(trimmed.spend) };
+    treasury = state.treasury + withCrews.taxRevenue - withCrews.spending + rescue.taken.length * LOAN_SIZE;
+  }
   const crime = crimeIndex(withCrews.unemployment, worstCover(covers), needsMet);
   const stability = nextStability(
     { ...state, policies, crime, protest, covers },
@@ -1622,11 +1699,23 @@ function settle(
     treasury,
     newTechNames.length,
     techs,
-    rescue.taken.length > 0,
+    {
+      rescued: rescue.taken.length > 0,
+      taken: rescue.taken.length,
+      debt: debtOf(loans),
+      austerity: austerity.length > 0,
+    },
   );
   const nextView = { ...withCrews, stability, treasury };
   const year = state.year + 1;
-  const labels = book ? [...statuteLabels(state, techs), ...opened, ...(protest ? ["Protest"] : [])] : [];
+  const labels = book
+    ? [
+        ...statuteLabels(state, techs),
+        ...openedPlants,
+        ...(protest ? ["Protest"] : []),
+        ...(austerity.length > 0 ? ["Austerity"] : []),
+      ]
+    : [];
   const built: Ledger = {
     version: 1,
     year,
@@ -1644,7 +1733,7 @@ function settle(
     sectors: withCrews.sectors,
     policies,
     techs,
-    works: clearStaged(builtWorks),
+    works: clearStaged(finalWorks),
     priceIndex: Math.round(withCrews.priceIndex * 100),
     profit: withCrews.profit,
     realWage: Math.round(withCrews.realWage),
@@ -1658,8 +1747,9 @@ function settle(
       ? writeBulletin(state, nextView, newTechNames, {
           protest,
           covers,
-          opened,
+          opened: openedPlants,
           loans: rescue.taken.map((loan) => `Loan ${loan.name} at ${(loan.rate * 100).toFixed(1)}%`),
+          austerity,
         })
       : "",
     hasClosedYear: true,
@@ -1750,7 +1840,7 @@ function writeBulletin(
   prev: Ledger,
   next: Project & { stability: number; treasury: number },
   newTechNames: string[],
-  city?: { protest: boolean; covers: ServiceCover; opened: string[]; loans?: string[] },
+  city?: { protest: boolean; covers: ServiceCover; opened: string[]; loans?: string[]; austerity?: string[] },
 ): string {
   let worst: { name: string; delta: number } | null = null;
   for (const sector of next.sectors) {
@@ -1819,6 +1909,7 @@ function writeBulletin(
   const stable = sentences.find((line) => line.startsWith("Stability")) ?? "";
   const cityLines: string[] = [];
   if (city?.opened.length) cityLines.push(`${listNames(city.opened.map((line) => line.replace(" opened", "")))} opened.`);
+  if (city?.austerity?.length) cityLines.push(`${city.austerity[0]}.`);
   if (city?.protest) cityLines.push("A protest broke out. Some firms left.");
   else if (city) {
     const short = SERVICES.find((def) => city.covers[def.id] < 0.98);
@@ -1838,15 +1929,27 @@ function nextStability(
   treasury: number,
   newTechCount: number,
   techs: Record<TechId, TechState>,
-  rescued = false,
+  fiscal: { rescued: boolean; taken: number; debt: number; austerity?: boolean } = {
+    rescued: false,
+    taken: 0,
+    debt: 0,
+  },
 ): number {
   const u = econ.unemployment;
   const price = econ.priceIndex;
   let delta = 0;
   const needs = prev.policies.stipend || prev.policies.dividend || prev.policies.ownership === "citizens";
-  if (u > 0.09) delta += (0.09 - u) * (needs ? 28 : 52);
+  if (u > 0.09) delta += (0.09 - u) * (needs ? 28 : 64);
   else if (u < 0.045) delta += 0.4;
-  delta += clamp((1 - price) * 26, 0, 11);
+
+  // Cheaper goods help people who can still buy them. Without a stipend,
+  // dividend, or resident ownership, the unemployed do not get that bonus.
+  const priceGain = clamp(Math.max(0, 1 - price) * 26, 0, 11);
+  if (needs) delta += priceGain;
+  else {
+    delta += priceGain * clamp(1 - u, 0, 1);
+    if (u > 0.08 && price < 0.98) delta -= (0.98 - price) * (u - 0.08) * 28;
+  }
 
   if (prev.policies.stipend) delta += 4.2 + (u > 0.08 ? Math.min(3.2, (u - 0.08) * 24) : 0);
   if (prev.policies.dividend) delta += 3.6;
@@ -1862,16 +1965,30 @@ function nextStability(
   if (prev.policies.gates === "tight" && u > 0.11) delta += 0.8;
   const goods = (econ.automatons * AUTOMATON_OUTPUT) / Math.max(1, econ.laborForce);
   if (price >= 0.98) delta += clamp(goods * 1.2, 0, 2);
-  if (rescued) delta -= 1.5;
-  if (newTechCount > 0 && econ.automatons === 0) delta -= newTechCount;
-  if (treasury < 0) delta -= 2.4 + Math.min(5, -treasury / 10_000_000);
+  if (newTechCount > 0) {
+    if (needs) delta -= Math.min(2, newTechCount * 0.2);
+    else delta -= Math.min(7, newTechCount * 0.7 + Math.max(0, u - 0.07) * 20);
+  }
+  if (fiscal.rescued) delta -= 2 + Math.min(10, fiscal.taken * 2);
+  if (fiscal.austerity) delta -= 6;
+  if (fiscal.debt > LOAN_SIZE) {
+    delta -= Math.min(18, (fiscal.debt - LOAN_SIZE) / 50_000_000);
+  }
+  if (treasury < 0) delta -= 4 + Math.min(12, -treasury / 8_000_000);
   if (econ.avgWage < prev.avgWage * 0.97) delta -= 1;
   if (econ.avgWage > prev.avgWage * 1.04 && u < 0.12) delta += 0.4;
   const worst = worstCover(prev.covers ?? { power: 1, water: 1, waste: 1 });
   if (worst < 0.98) delta -= (0.98 - worst) * 45;
   if (prev.crime > 22) delta -= (prev.crime - 22) * 0.09;
   if (prev.protest) delta -= 5;
-  delta = clamp(delta, -12, 8);
+  const shock =
+    newTechCount >= 3 ||
+    fiscal.rescued ||
+    fiscal.taken >= 2 ||
+    fiscal.austerity ||
+    fiscal.debt > 400_000_000 ||
+    treasury < 0;
+  delta = clamp(delta, shock ? -20 : -12, 8);
   return clamp(Math.round(prev.stability + delta), 0, 100);
 }
 

@@ -69,6 +69,15 @@ function reserveRows(history: YearMark[], pace: YearMark[] | null): ChartRow[] {
   });
 }
 
+export type BookChartRow = { year: number; income: number; expenses: number };
+
+/** Closed-year books only. The opening census has tax but no spending, so it is omitted. */
+export function bookChartRows(history: YearMark[]): BookChartRow[] {
+  return history
+    .filter((mark) => mark.spending > 0)
+    .map((mark) => ({ year: mark.year, income: mark.taxRevenue, expenses: mark.spending }));
+}
+
 /** Latest actual-minus-pace gap. Ignores the anchor year, where the two lines meet. */
 export function latestGap(rows: ChartRow[], pace: YearMark[] | null): number | null {
   if (!pace?.length) return null;

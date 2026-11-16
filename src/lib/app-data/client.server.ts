@@ -278,7 +278,9 @@ function tokenIdentityKey(token: string): string {
             .digest("base64url");
         }
       }
-    } catch {}
+    } catch {
+      /* Token was not a readable JWT; hash the raw value instead. */
+    }
   }
   return createHash("sha256").update(token).digest("base64url");
 }
