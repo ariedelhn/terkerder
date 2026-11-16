@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { copyFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -38,5 +38,13 @@ writeFileSync(
     2,
   )}\n`,
 );
+
+const cssFiles = readdirSync(join(out, "assets")).filter((name) => name.endsWith(".css"));
+const css = cssFiles.map((name) => readFileSync(join(out, "assets", name), "utf8")).join("\n");
+for (const token of ["fixed", "inset-0", "h-dvh", "pointer-events-none", "text-gold"]) {
+  if (!css.includes(token)) {
+    throw new Error(`Pages CSS is missing required utility "${token}". Tailwind probably did not scan src/.`);
+  }
+}
 
 console.log("Pages build ready in dist-pages (index, 404 fallback, manifest, .nojekyll).");

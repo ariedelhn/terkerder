@@ -8,6 +8,7 @@ const root = path.dirname(fileURLToPath(import.meta.url));
 
 // Static GitHub Pages build. `npm run dev` keeps using vite.config.ts.
 // Auth stays off so the game is playable without a server.
+// Vite root is pages/, so src/styles.css uses @source "../src" to keep Tailwind utilities.
 process.env.VITE_AUTH_ENABLED ??= "false";
 
 export default defineConfig({

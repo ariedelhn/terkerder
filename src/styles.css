@@ -1,4 +1,6 @@
 @import "tailwindcss";
+/* Scan src even when Vite root is pages/ (GitHub Pages build). */
+@source "../src";
 
 @theme {
   --color-background: #10141c8c;
