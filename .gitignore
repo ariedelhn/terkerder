@@ -10,3 +10,4 @@ attachments
 *.log
 .env
 .env.*
+dist-pages

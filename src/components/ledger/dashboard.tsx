@@ -202,7 +202,7 @@ export function Dashboard() {
     <div className="relative h-dvh">
       <div className="pointer-events-none fixed inset-0 overflow-hidden" aria-hidden="true">
         <img
-          src="/city-bg.jpg"
+          src={`${import.meta.env.BASE_URL}city-bg.jpg`}
           alt=""
           className="h-full w-full scale-110 object-cover blur-[10px]"
         />
