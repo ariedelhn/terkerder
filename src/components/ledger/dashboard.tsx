@@ -65,8 +65,9 @@ import {
 } from "@/lib/sim/format";
 import { loadLedger, loadSaves, rememberCity, forgetSave, saveLedger, type CitySave } from "@/lib/sim/storage";
 import { Trends } from "@/components/ledger/trends";
+import { CityMap } from "@/components/ledger/city-map";
 
-type Tab = "sectors" | "city" | "policy" | "technology" | "people" | "figures" | "charts" | "expenses";
+type Tab = "sectors" | "city" | "policy" | "technology" | "people" | "figures" | "charts" | "map" | "expenses";
 
 const SECTOR_TEXT: Record<SectorId, string> = {
   housing: "text-gold",
@@ -322,6 +323,7 @@ export function Dashboard() {
               <TabButton id="people" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="People" />
               <TabButton id="figures" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="Figures" />
               <TabButton id="charts" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="Charts" />
+              <TabButton id="map" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="Map" />
               <TabButton id="expenses" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="Expenses" />
             </div>
           </nav>
@@ -424,6 +426,7 @@ export function Dashboard() {
         ) : null}
         {tab === "people" ? <Ages ledger={ledger} /> : null}
         {tab === "charts" ? <Trends ledger={ledger} /> : null}
+        {tab === "map" ? <CityMap ledger={ledger} /> : null}
         {tab === "expenses" ? <Expenses ledger={ledger} /> : null}
         {tab === "sectors" ? <SectorList ledger={ledger} /> : null}
         {tab === "city" ? (
