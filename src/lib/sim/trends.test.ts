@@ -62,3 +62,13 @@ test("books chart skips the opening census surplus", () => {
   assert.equal(rows[0]!.income, 425_000_000);
   assert.equal(rows[0]!.expenses, 424_000_000);
 });
+
+test("inflation series defaults to 2% on older marks", () => {
+  const history = [mark(1, 0.05), { ...mark(2, 0.06), inflation: 0.041, priceIndex: 104 }];
+  const rows = chartRows(history, null, "inflation");
+  assert.equal(rows[0]!.value, 0.02);
+  assert.equal(rows[1]!.value, 0.041);
+  const prices = chartRows(history, null, "priceIndex");
+  assert.equal(prices[0]!.value, 100);
+  assert.equal(prices[1]!.value, 104);
+});

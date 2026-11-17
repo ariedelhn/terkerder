@@ -10,6 +10,12 @@ export function formatPct(rate: number): string {
   return `${(rate * 100).toFixed(1)}%`;
 }
 
+/** Signed inflation or similar rates, e.g. +6.2% or −1.4%. */
+export function formatSignedPct(rate: number): string {
+  if (Math.abs(rate) < 0.0005) return "0.0%";
+  return `${rate > 0 ? "+" : "−"}${formatPct(Math.abs(rate))}`;
+}
+
 function signOf(n: number): string {
   return n > 0 ? "+" : "−";
 }

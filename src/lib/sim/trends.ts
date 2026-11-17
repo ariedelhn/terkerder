@@ -11,6 +11,7 @@ export type SeriesId =
   | "reserveChange"
   | "books"
   | "priceIndex"
+  | "inflation"
   | "profit"
   | "stability";
 
@@ -32,6 +33,7 @@ export function readSeries(mark: YearMark, id: SeriesId): number {
   if (id === "wagePerCapita") return wagePerCapita(mark);
   if (id === "reserveChange" || id === "books") return 0;
   if (id === "priceIndex") return mark.priceIndex ?? 100;
+  if (id === "inflation") return mark.inflation ?? 0.02;
   if (id === "profit") return mark.profit ?? 0;
   return mark[id];
 }

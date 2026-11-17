@@ -58,6 +58,7 @@ import {
   formatPct,
   formatSignedInt,
   formatSignedMarks,
+  formatSignedPct,
   formatSignedPoints,
   formatSignedPp,
   stabilityWord,
@@ -266,8 +267,16 @@ export function Dashboard() {
                 Unemployment {formatPct(ledger.unemployment)}
               </span>
               <span className="text-muted-foreground"> · </span>
-              <span className={ledger.priceIndex < 98 ? "text-ok" : ledger.priceIndex > 105 ? "text-warn" : "text-foreground"}>
-                Prices {ledger.priceIndex}
+              <span
+                className={
+                  ledger.inflation > 0.04 || ledger.priceIndex > 110
+                    ? "text-warn"
+                    : ledger.inflation < -0.01
+                      ? "text-ok"
+                      : "text-foreground"
+                }
+              >
+                Prices {Math.round(ledger.priceIndex)} · {formatSignedPct(ledger.inflation)}
               </span>
             </p>
           </div>
@@ -367,6 +376,22 @@ export function Dashboard() {
                 tone={stability < 35 ? "danger" : stability >= 80 ? "ok" : "water"}
                 meter={stability}
               />
+              <Metric
+                label="Inflation"
+                value={formatSignedPct(ledger.inflation)}
+                unit={ledger.hasClosedYear ? "in prices this year" : "the going rate"}
+                delta={null}
+                testId="inflation"
+                tone={ledger.inflation > 0.08 ? "danger" : ledger.inflation > 0.04 ? "coral" : ledger.inflation < -0.01 ? "ok" : "default"}
+              />
+              <Metric
+                label="Real wage"
+                value={formatInt(ledger.realWage)}
+                unit="crypto coins of goods"
+                delta={null}
+                testId="real-wage"
+                tone="gold"
+              />
             </section>
             <div className="mt-4">
               <ServiceMeters ledger={ledger} onOpen={() => selectTab("city")} />
@@ -391,7 +416,7 @@ export function Dashboard() {
                 {ledger.debt > 0 ? ` · debt ${formatMarks(ledger.debt)}` : ""}
               </p>
               <p className="mt-2 text-sm text-muted-foreground">
-                Prices {ledger.priceIndex}. A wage buys {formatInt(ledger.realWage)} crypto coins of goods.
+                Prices {Math.round(ledger.priceIndex)}, {formatSignedPct(ledger.inflation)}. A wage buys {formatInt(ledger.realWage)} crypto coins of goods.
                 {ledger.profit > 0 ? ` Machine profit ${formatMarks(ledger.profit)}, held by ${ledger.policies.ownership}.` : " No machine profit yet."}
               </p>
             </section>
@@ -1300,7 +1325,7 @@ function TechList({ ledger, onToggle }: { ledger: Ledger; onToggle: (id: TechId)
   return (
     <div className="flex flex-col gap-3">
       <p className="text-sm text-muted-foreground">
-        A machine makes ten times the goods of one worker. Prices fall, and a profit appears. Firms, the city, or the residents can own that profit. The workers who were fired do not get the cheaper goods unless a stipend, a dividend, or resident ownership pays them. Retraining moves people into other work over several years. The machines also hire a small crew to tend them, and they use more power.
+        A machine makes ten times the goods of one worker. That abundance holds prices down, and a profit appears. Firms, the city, or the residents can own that profit. The workers who were fired do not get the cheaper goods unless a stipend, a dividend, or resident ownership pays them. Retraining moves people into other work over several years. The machines also hire a small crew to tend them, and they use more power.
       </p>
       <div className="overflow-hidden rounded-xl border border-border bg-card">
       {TECHS.map((tech, index) => {

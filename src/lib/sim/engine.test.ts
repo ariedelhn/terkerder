@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { advance, borrow, dueThisYear, interestRemaining, nextLoanRate, openingState, plantJobs, prepay, serviceOutlook, stageService, toggleTech, utilityJobs, type Ledger, type TechId } from "./engine.ts";
+import { advance, borrow, dueThisYear, INFLATION_TARGET, interestRemaining, nextLoanRate, openingState, plantJobs, prepay, PRICE_CENSUS, serviceOutlook, stageService, toggleTech, utilityJobs, yearInflation, type Ledger, type TechId } from "./engine.ts";
 
 function line(state: Ledger): string {
   const u = (state.unemployment * 100).toFixed(1);
@@ -8,7 +8,10 @@ function line(state: Ledger): string {
   const tax = (state.taxRevenue / 1e6).toFixed(1);
   const spend = (state.spending / 1e6).toFixed(1);
   const reserve = (state.treasury / 1e6).toFixed(1);
-  return `y${state.year} u=${u}% wage=${wage} tax=${tax}m spend=${spend}m rsv=${reserve}m stab=${state.stability} pop=${state.population} emp=${state.employed}`;
+  const infl = ((state.inflation ?? 0) * 100).toFixed(1);
+  const cpi = Math.round(state.priceIndex);
+  const real = Math.round(state.realWage);
+  return `y${state.year} u=${u}% infl=${infl}% cpi=${cpi} wage=${wage} real=${real} tax=${tax}m spend=${spend}m rsv=${reserve}m stab=${state.stability} pop=${state.population} emp=${state.employed}`;
 }
 
 function run(start: Ledger, years: number): Ledger[] {
@@ -443,4 +446,89 @@ test("damaged ownership does not NaN the books", () => {
   assert.ok(Number.isFinite(next.taxRevenue), `tax ${next.taxRevenue}`);
   assert.ok(Number.isFinite(next.treasury), `treasury ${next.treasury}`);
   assert.equal(next.enacted.ownership, "firms");
+});
+
+test("opening census starts at a 100 price index and 2% inflation", () => {
+  const state = openingState();
+  assert.equal(state.priceIndex, PRICE_CENSUS);
+  assert.equal(state.inflation, INFLATION_TARGET);
+  assert.equal(state.wageScale, 1);
+  assert.equal(state.realWage, Math.round(state.avgWage));
+  assert.ok(state.bulletin.includes("Opening census"));
+});
+
+test("a quiet city stays near 2% inflation without a stability shock", () => {
+  const path = run(openingState(), 10);
+  const rates = path.slice(1).map((state) => state.inflation);
+  assert.ok(rates.every((rate) => rate > 0 && rate < 0.04), `quiet inflation ${rates}`);
+  assert.ok(rates.some((rate) => rate >= 0.01 && rate <= 0.03));
+  const last = path[path.length - 1]!;
+  assert.ok(last.stability >= 65, `quiet stability ${last.stability}`);
+  assert.ok(last.priceIndex > 100);
+});
+
+test("a year bulletin names the inflation rate", () => {
+  const next = advance(openingState());
+  assert.match(next.bulletin, /Prices (rose|fell) \d+\.\d+%/);
+});
+
+test("automation holds prices below a quiet city", () => {
+  const quiet = advance(openingState());
+  const food = advance(toggleTech(openingState(), "food"));
+  assert.ok(food.priceIndex < quiet.priceIndex, `food ${food.priceIndex} vs quiet ${quiet.priceIndex}`);
+  assert.ok(food.inflation < quiet.inflation);
+  assert.ok(food.profit > 1_000_000);
+});
+
+test("stipend and dividend deficits can produce high inflation and cut real wages", () => {
+  const start = {
+    ...openingState(),
+    policies: { ...openingState().policies, stipend: true, dividend: true, works: true },
+  };
+  const path = run(start, 7);
+  const peak = Math.max(...path.map((state) => state.inflation));
+  assert.ok(peak >= 0.08, `peak inflation ${peak}`);
+  const last = path[path.length - 1]!;
+  assert.ok(last.realWage < path[0]!.realWage, `real wage ${last.realWage} vs ${path[0]!.realWage}`);
+  assert.ok(last.priceIndex > 130);
+  assert.ok(last.stability < path[0]!.stability);
+});
+
+test("mass automation can push prices down in the first live years", () => {
+  let state = openingState();
+  const ids: TechId[] = ["housing", "transport", "food", "energy", "services", "government", "health", "education", "law"];
+  for (const id of ids) state = toggleTech(state, id);
+  const year2 = advance(state);
+  const year3 = advance(year2);
+  assert.ok(year2.inflation < 0, `year-2 inflation ${year2.inflation}`);
+  assert.ok(year3.priceIndex < PRICE_CENSUS);
+});
+
+test("yearInflation stays near 2% when the city is balanced", () => {
+  const balanced = yearInflation({
+    prevInflation: INFLATION_TARGET,
+    unemployment: 0.05,
+    covers: { power: 1, water: 1, waste: 1 },
+    goodsRatio: 1,
+    prevGoodsRatio: 1,
+    gdp: 2_000_000_000,
+    deficit: 0,
+    transfers: 0,
+    moneyFinancing: 0,
+  });
+  assert.ok(Math.abs(balanced - INFLATION_TARGET) < 0.002, `balanced ${balanced}`);
+
+  const financed = yearInflation({
+    prevInflation: INFLATION_TARGET,
+    unemployment: 0.05,
+    covers: { power: 1, water: 1, waste: 1 },
+    goodsRatio: 1,
+    prevGoodsRatio: 1,
+    gdp: 2_000_000_000,
+    deficit: 400_000_000,
+    transfers: 200_000_000,
+    moneyFinancing: 160_000_000,
+  });
+  assert.ok(financed > 0.06, `financed ${financed}`);
+  assert.ok(financed < 0.2, `financed ${financed}`);
 });

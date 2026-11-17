@@ -34,3 +34,19 @@ test("asPolicies keeps valid ownership and rejects a broken tax band", () => {
   assert.equal(good?.ownership, "citizens");
   assert.equal(asPolicies({ ...good, tax: "steep" }), null);
 });
+
+test("saves without inflation fields load at a 100 index and 2% inflation", () => {
+  const raw = JSON.parse(JSON.stringify(openingState())) as Record<string, unknown>;
+  delete raw.inflation;
+  delete raw.wageScale;
+  delete raw.priceIndex;
+  const history = raw.history as Record<string, unknown>[];
+  if (history?.[0]) {
+    delete history[0].inflation;
+  }
+  const revived = reviveLedger(raw);
+  assert.ok(revived);
+  assert.equal(revived.inflation, 0.02);
+  assert.equal(revived.wageScale, 1);
+  assert.equal(revived.priceIndex, 100);
+});

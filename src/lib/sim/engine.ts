@@ -14,6 +14,13 @@ export const WORKS_AT_BASE = 26_000_000;
 export const RETRAIN_AT_BASE = 18_000_000;
 export const OPEN_TREASURY = 84_000_000;
 export const OPEN_STABILITY = 72;
+/** Census inflation, and the rate a balanced city tends toward. */
+export const INFLATION_TARGET = 0.02;
+/** Opening price level. The index is cumulative and starts here. */
+export const PRICE_CENSUS = 100;
+/** Share of this year's inflation that shows up in nominal pay the same year.
+ * Near the 2% target most of the rise is passed through; high inflation still erodes real pay. */
+export const WAGE_PASS_THROUGH = 0.85;
 /** One machine produces this many human-years of goods. */
 export const AUTOMATON_OUTPUT = 10;
 /** Tax collected on machine profits, by who owns them. */
@@ -398,10 +405,12 @@ export type YearMark = {
   powerCost?: number;
   waterCost?: number;
   wasteCost?: number;
-  /** 100 is the opening census. Lower means cheaper goods. */
+  /** 100 is the opening census. Cumulative price level. */
   priceIndex?: number;
   profit?: number;
   realWage?: number;
+  /** Yearly inflation rate, e.g. 0.02 for 2%. */
+  inflation?: number;
 };
 
 export type AgeId = "children" | "teens" | "adults" | "seniors";
@@ -478,11 +487,15 @@ export type Ledger = {
   policies: Policies;
   techs: Record<TechId, TechState>;
   works: Works;
-  /** 100 at the opening census. Falls when machines make goods abundant. */
+  /** 100 at the opening census. Cumulative price level. */
   priceIndex: number;
+  /** Yearly inflation rate, e.g. 0.02 for 2%. */
+  inflation: number;
+  /** Nominal wage scale vs the census. Lags the price level. */
+  wageScale: number;
   /** Profit left after wages. Taxed, or paid out, depending on ownership. */
   profit: number;
-  /** Wage divided by the price index. What a paycheck buys. */
+  /** Nominal wage divided by the price index / 100. What a paycheck buys. */
   realWage: number;
   transition: Transition;
   loans: CityLoan[];
@@ -893,6 +906,10 @@ type Project = {
   wanted: number;
   automatons: number;
   priceIndex: number;
+  inflation: number;
+  wageScale: number;
+  /** Automation abundance, 1 at the census. Used as a disinflationary force, not the CPI. */
+  goodsRatio: number;
   profit: number;
   realWage: number;
   transition: Transition;
@@ -918,8 +935,8 @@ function absorption(techs: Record<TechId, TechState>, policies: Policies): numbe
   return (1 - Math.pow(0.7, avgYears)) * 0.55;
 }
 
-/** 1.00 is the census. Machines make goods abundant and the index falls. */
-function priceRatio(techs: Record<TechId, TechState>): number {
+/** 1.00 is the census. Machines make goods abundant; this is a disinflationary force, not the CPI. */
+export function priceRatio(techs: Record<TechId, TechState>): number {
   let base = 0;
   let output = 0;
   for (const sector of SECTORS) {
@@ -932,6 +949,68 @@ function priceRatio(techs: Record<TechId, TechState>): number {
   if (base <= 0) return 1;
   return clamp(1 / Math.pow(output / base, 0.35), 0.55, 1.08);
 }
+
+export type PriceDrivers = {
+  prevInflation: number;
+  unemployment: number;
+  covers: ServiceCover;
+  goodsRatio: number;
+  prevGoodsRatio: number;
+  gdp: number;
+  deficit: number;
+  transfers: number;
+  moneyFinancing: number;
+};
+
+/** This year's inflation rate. A balanced city stays near the 2% target. */
+export function yearInflation(input: PriceDrivers): number {
+  const prev = Number.isFinite(input.prevInflation) ? input.prevInflation : INFLATION_TARGET;
+  const inertia = clamp(0.55 + clamp((prev - 0.04) * 2, 0, 0.3), 0.45, 0.85);
+  const expected = inertia * prev + (1 - inertia) * INFLATION_TARGET;
+
+  const u = input.unemployment;
+  const nairu = 0.05;
+  let phillips = 0.25 * (nairu - u);
+  if (u < 0.03) phillips += (0.03 - u) * 0.6;
+  phillips = clamp(phillips, -0.015, 0.025);
+
+  const gdp = Math.max(input.gdp, 1);
+  const deficitRatio = input.deficit / gdp;
+  const transferRatio = Math.max(0, input.transfers) / gdp;
+  const moneyRatio = Math.max(0, input.moneyFinancing) / gdp;
+  let demand = 0.14 * deficitRatio + 0.22 * moneyRatio + 0.07 * transferRatio;
+  if (deficitRatio > 0.15) demand += 0.35 * (deficitRatio - 0.15);
+  if (moneyRatio > 0.1) demand += 0.3 * (moneyRatio - 0.1);
+
+  const covers = input.covers;
+  const shortfall =
+    Math.max(0, 1 - (covers.power ?? 1)) +
+    Math.max(0, 1 - (covers.water ?? 1)) +
+    Math.max(0, 1 - (covers.waste ?? 1));
+  const supply = 0.07 * shortfall;
+
+  const abundanceLevel = (input.goodsRatio - 1) * 0.02;
+  const abundanceDelta = Math.min(0, input.goodsRatio - input.prevGoodsRatio) * 0.1;
+
+  return clamp(expected + phillips + demand + supply + abundanceLevel + abundanceDelta, -0.08, 1.2);
+}
+
+export function nextPriceIndex(prev: number, inflation: number): number {
+  const base = Number.isFinite(prev) && prev > 0 ? prev : PRICE_CENSUS;
+  return clamp(base * (1 + inflation), 20, 1_000_000);
+}
+
+export function wagePassThrough(inflation: number): number {
+  if (inflation > 0.05) return 0.5;
+  if (inflation > 0.035) return 0.65;
+  return WAGE_PASS_THROUGH;
+}
+
+export function nextWageScale(prev: number, inflation: number): number {
+  const base = Number.isFinite(prev) && prev > 0 ? prev : 1;
+  return Math.max(0.2, base * (1 + wagePassThrough(inflation) * inflation));
+}
+
 
 function machineCount(state: Pick<Ledger, "sectors">): number {
   return state.sectors.reduce((sum, sector) => sum + (sector.automatons ?? 0), 0);
@@ -1048,6 +1127,16 @@ function project(args: {
   climate: number;
   serviceSpend: { services: number; interest: number; principal: number; construction: number };
   works: Works;
+  /** Last year's cumulative price index (100 at census). */
+  priceLevel?: number;
+  /** Last year's nominal wage scale (1 at census). */
+  wageScale?: number;
+  prevInflation?: number;
+  prevTechs?: Record<TechId, TechState>;
+  covers?: ServiceCover;
+  treasury?: number;
+  /** Opening census: keep prices at 100 and inflation at the target. */
+  freezePrices?: boolean;
 }): Project {
   const forces = yearForces(args.year);
   let participation = PARTICIPATION + forces.participation;
@@ -1098,7 +1187,7 @@ function project(args: {
     const automatons = gone <= 0 || gone >= 0.98 ? 0 : Math.round((humans * gone) / (1 - gone));
     const premium = 1 + gone * 0.28;
     const wage =
-      Math.round((sector.baseWage * relative * premium * forces.pay) / 100) * 100;
+      Math.round((sector.baseWage * relative * premium * forces.pay * (args.wageScale ?? 1)) / 100) * 100;
     const prev = args.prevEmployed?.get(sector.id);
     return {
       id: sector.id,
@@ -1109,72 +1198,114 @@ function project(args: {
     };
   });
 
-  const wageBill = sectors.reduce((sum, sector) => sum + sector.employed * sector.wage, 0);
-  const avgWage = employed > 0 ? wageBill / employed : 0;
-  const priceIndex = priceRatio(args.techs);
+  const wageBill0 = sectors.reduce((sum, sector) => sum + sector.employed * sector.wage, 0);
+  const goodsRatio = priceRatio(args.techs);
   const automatons = sectors.reduce((sum, sector) => sum + sector.automatons, 0);
   const outputUnits = sectors.reduce(
     (sum, sector) => sum + sector.employed + sector.automatons * AUTOMATON_OUTPUT,
     0,
   );
-  const goods = outputUnits * avgWage * priceIndex;
-  const profit = Math.max(0, Math.round(goods - wageBill));
-  let humanBase = 0;
-  for (let index = 0; index < SECTORS.length; index += 1) {
-    const sector = SECTORS[index]!;
-    const snap = sectors[index]!;
-    let activity = 1;
-    if (sector.id === "transport") activity *= forces.trade;
-    if (sector.id === "transport" && args.policies.gates === "open") activity *= 1.05;
-    if (sector.id === "transport" && args.policies.gates === "tight") activity *= 0.97;
-    if (sector.id === "housing") activity *= forces.slot.housing;
-    humanBase += snap.employed * snap.wage * activity;
+  const prevPrice = args.priceLevel ?? PRICE_CENSUS;
+  const prevWageScale = args.wageScale ?? 1;
+  const priceLevel0 = prevPrice;
+  function booksFor(
+    wageSectors: SectorSnap[],
+    wageScale: number,
+    priceIndex: number,
+  ): { avgWage: number; profit: number; taxRevenue: number; spend: SpendParts; spending: number } {
+    const wageBill = wageSectors.reduce((sum, sector) => sum + sector.employed * sector.wage, 0);
+    const avgWage = employed > 0 ? wageBill / employed : 0;
+    const goods =
+      outputUnits * avgWage * (priceIndex / (PRICE_CENSUS * Math.max(wageScale, 0.2)));
+    const profit = Math.max(0, Math.round(goods - wageBill));
+    let humanBase = 0;
+    for (let index = 0; index < SECTORS.length; index += 1) {
+      const sector = SECTORS[index]!;
+      const snap = wageSectors[index]!;
+      let activity = 1;
+      if (sector.id === "transport") activity *= forces.trade;
+      if (sector.id === "transport" && args.policies.gates === "open") activity *= 1.05;
+      if (sector.id === "transport" && args.policies.gates === "tight") activity *= 0.97;
+      if (sector.id === "housing") activity *= forces.slot.housing;
+      humanBase += snap.employed * snap.wage * activity;
+    }
+    const band = args.policies.tax === "high" ? 1.12 : args.policies.tax === "low" ? 0.88 : 1;
+    const ownership = asOwnership(args.policies.ownership);
+    const profitTax = Math.round(profit * PROFIT_TAKE[ownership] * band);
+    const taxRevenue = Math.round(humanBase * TAX_RATES[args.policies.tax]) + profitTax;
+    const unemployed = Math.max(0, laborForce - employed);
+    const cola = priceIndex / PRICE_CENSUS;
+    const costs = programCosts(args.pop, unemployed);
+    let dividend = args.policies.dividend ? Math.round(costs.dividend * cola) : 0;
+    if (ownership === "citizens") dividend += Math.round(profit * CITIZEN_PAYOUT);
+    const spend: SpendParts = {
+      standing: Math.round(costs.standing * cola),
+      stipend: args.policies.stipend ? Math.round(costs.stipend * cola) : 0,
+      dividend,
+      works: args.policies.works ? Math.round(costs.works * cola) : 0,
+      retrain: args.policies.retrain ? Math.round(costs.retrain * cola) : 0,
+      services: Math.round(args.serviceSpend.services * cola),
+      interest: args.serviceSpend.interest,
+      construction: Math.round(args.serviceSpend.construction * cola),
+      principal: args.serviceSpend.principal,
+    };
+    const spending = spendTotal(spend);
+    return { avgWage, profit, taxRevenue, spend, spending };
   }
-  const band = args.policies.tax === "high" ? 1.12 : args.policies.tax === "low" ? 0.88 : 1;
-  const ownership = asOwnership(args.policies.ownership);
-  const profitTax = Math.round(profit * PROFIT_TAKE[ownership] * band);
-  const taxRevenue = Math.round(humanBase * TAX_RATES[args.policies.tax]) + profitTax;
+
+  const first = booksFor(sectors, prevWageScale, priceLevel0);
+  const unemployment = first && employed >= 0 ? (laborForce - employed) / laborForce : 0;
   const unemployed = Math.max(0, laborForce - employed);
-  const costs = programCosts(args.pop, unemployed);
-  let dividend = args.policies.dividend ? costs.dividend : 0;
-  if (ownership === "citizens") dividend += Math.round(profit * CITIZEN_PAYOUT);
-  const spend: SpendParts = {
-    standing: costs.standing,
-    stipend: args.policies.stipend ? costs.stipend : 0,
-    dividend,
-    works: args.policies.works ? costs.works : 0,
-    retrain: args.policies.retrain ? costs.retrain : 0,
-    services: args.serviceSpend.services,
-    interest: args.serviceSpend.interest,
-    construction: args.serviceSpend.construction,
-    principal: args.serviceSpend.principal,
-  };
-  const spending =
-    spend.standing +
-    spend.stipend +
-    spend.dividend +
-    spend.works +
-    spend.retrain +
-    spend.services +
-    spend.interest +
-    spend.principal +
-    spend.construction;
+  let inflation = args.prevInflation ?? INFLATION_TARGET;
+  let priceIndex = priceLevel0;
+  let wageScale = prevWageScale;
+  let pricedSectors = sectors;
+  let priced = first;
+
+  if (!args.freezePrices) {
+    const covers = args.covers ?? { power: 1, water: 1, waste: 1 };
+    const gap = (args.treasury ?? 0) + first.taxRevenue - first.spending;
+    const moneyFinancing = gap < 0 ? Math.min(8, Math.ceil(-gap / LOAN_SIZE)) * LOAN_SIZE : 0;
+    inflation = yearInflation({
+      prevInflation: args.prevInflation ?? INFLATION_TARGET,
+      unemployment,
+      covers,
+      goodsRatio,
+      prevGoodsRatio: priceRatio(args.prevTechs ?? args.techs),
+      gdp: wageBill0 + first.profit,
+      deficit: first.spending - first.taxRevenue,
+      transfers: first.spend.stipend + first.spend.dividend + first.spend.works,
+      moneyFinancing,
+    });
+    priceIndex = nextPriceIndex(priceLevel0, inflation);
+    wageScale = nextWageScale(prevWageScale, inflation);
+    const wageLift = wageScale / Math.max(prevWageScale, 1e-9);
+    pricedSectors = sectors.map((sector) => ({
+      ...sector,
+      wage: Math.round((sector.wage * wageLift) / 100) * 100,
+    }));
+    priced = booksFor(pricedSectors, wageScale, priceIndex);
+  }
+
   return {
-    sectors,
+    sectors: pricedSectors,
     employed,
     laborForce,
     ages,
     unemployed,
-    unemployment: unemployed / laborForce,
-    avgWage,
-    taxRevenue,
-    spending,
-    spend,
+    unemployment,
+    avgWage: priced.avgWage,
+    taxRevenue: priced.taxRevenue,
+    spending: priced.spending,
+    spend: priced.spend,
     wanted,
     automatons,
     priceIndex,
-    profit,
-    realWage: priceIndex > 0 ? avgWage / priceIndex : avgWage,
+    inflation,
+    wageScale,
+    goodsRatio,
+    profit: priced.profit,
+    realWage: priceIndex > 0 ? priced.avgWage / (priceIndex / PRICE_CENSUS) : priced.avgWage,
     transition: {
       laidOff: Math.round(automatons * (args.policies.retrain ? 0.45 : 0.82)),
       retraining: args.policies.retrain ? Math.round(automatons * absorption(args.techs, args.policies)) : 0,
@@ -1225,6 +1356,10 @@ export function openingState(charter: CharterId = "census"): Ledger {
     climate: 1,
     serviceSpend: { services: 0, interest: 0, principal: 0, construction: 0 },
     works: openingWorks(),
+    priceLevel: PRICE_CENSUS,
+    wageScale: 1,
+    prevInflation: INFLATION_TARGET,
+    freezePrices: true,
   });
   const openingWorksState = openingWorks();
   const openingCovers = coverOf(BASE_POP, census.employed, openingWorksState);
@@ -1246,7 +1381,9 @@ export function openingState(charter: CharterId = "census"): Ledger {
     policies: policiesFor(charter),
     techs: techsFor(charter),
     works: openingWorksState,
-    priceIndex: Math.round(census.priceIndex * 100),
+    priceIndex: census.priceIndex,
+    inflation: INFLATION_TARGET,
+    wageScale: 1,
     profit: census.profit,
     realWage: Math.round(census.realWage),
     transition: census.transition,
@@ -1281,7 +1418,7 @@ function nextPopulation(state: Ledger): number {
   if (u < 0.07) growth += 0.002;
   if (state.policies.gates === "open") growth += 0.008;
   if (state.policies.gates === "tight") growth -= 0.005;
-  if (state.avgWage > 43_000) growth += 0.001;
+  if (state.realWage > 43_000) growth += 0.001;
   growth += yearForces(state.year + 1).migration;
   const water = state.covers?.water ?? 1;
   if (water < 1) growth -= (1 - water) * 0.015;
@@ -1347,6 +1484,7 @@ export function snapshot(state: Ledger): YearMark {
     priceIndex: state.priceIndex,
     profit: state.profit,
     realWage: state.realWage,
+    inflation: state.inflation,
     powerCost: bill.power,
     waterCost: bill.water,
     wasteCost: bill.waste,
@@ -1355,12 +1493,12 @@ export function snapshot(state: Ledger): YearMark {
 
 type TrailInput = Omit<
   Ledger,
-  "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers"
+  "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale"
 > &
   Partial<
     Pick<
       Ledger,
-      "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers"
+      "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale"
     >
   >;
 
@@ -1383,18 +1521,27 @@ export function ensureTrail(state: TrailInput): Ledger {
   const debt = debtOf(loans);
   const covers = state.covers ?? coverOf(state.population, state.employed, works);
   const history = (state.history?.length ? state.history : []).map((mark, index, all) => {
-    if (typeof mark.laborForce === "number") return mark;
     const isCurrent = index === all.length - 1 && mark.year === state.year;
+    const laborForce =
+      typeof mark.laborForce === "number"
+        ? mark.laborForce
+        : isCurrent
+          ? state.laborForce
+          : Math.round(mark.population * PARTICIPATION);
     return {
       ...mark,
-      laborForce: isCurrent ? state.laborForce : Math.round(mark.population * PARTICIPATION),
+      laborForce,
+      inflation: mark.inflation ?? INFLATION_TARGET,
+      priceIndex: mark.priceIndex ?? PRICE_CENSUS,
     };
   });
   const shadowLoans = state.shadow ? (state.shadow.loans ?? loansFromBalance(state.shadow.debt ?? 0)) : [];
   const withBooks: Ledger = {
     ...state,
     policies,
-    priceIndex: state.priceIndex ?? 100,
+    priceIndex: state.priceIndex ?? PRICE_CENSUS,
+    inflation: state.inflation ?? INFLATION_TARGET,
+    wageScale: state.wageScale ?? 1,
     profit: state.profit ?? 0,
     realWage: state.realWage ?? state.avgWage,
     transition: state.transition ?? { laidOff: 0, retraining: 0, tenders: 0 },
@@ -1416,6 +1563,9 @@ export function ensureTrail(state: TrailInput): Ledger {
           policies: { ...state.shadow.policies, ownership: asOwnership(state.shadow.policies.ownership) },
           loans: shadowLoans,
           debt: debtOf(shadowLoans),
+          inflation: state.shadow.inflation ?? INFLATION_TARGET,
+          wageScale: state.shadow.wageScale ?? 1,
+          priceIndex: state.shadow.priceIndex ?? PRICE_CENSUS,
         }
       : null,
     pace: state.pace ?? null,
@@ -1671,6 +1821,12 @@ function settle(
       construction: book ? serviceCapex(state.works) : 0,
     },
     works: builtWorks,
+    priceLevel: state.priceIndex ?? PRICE_CENSUS,
+    wageScale: state.wageScale ?? 1,
+    prevInflation: state.inflation ?? INFLATION_TARGET,
+    prevTechs: state.techs,
+    covers,
+    treasury: state.treasury,
   });
   let withCrews = econ;
   let treasury = state.treasury + withCrews.taxRevenue - withCrews.spending;
@@ -1734,7 +1890,9 @@ function settle(
     policies,
     techs,
     works: clearStaged(finalWorks),
-    priceIndex: Math.round(withCrews.priceIndex * 100),
+    priceIndex: withCrews.priceIndex,
+    inflation: withCrews.inflation,
+    wageScale: withCrews.wageScale,
     profit: withCrews.profit,
     realWage: Math.round(withCrews.realWage),
     transition: withCrews.transition,
@@ -1889,8 +2047,10 @@ function writeBulletin(
         : `${listNames(city.loans)} were taken to cover the reserve.`,
     );
   }
-  if (next.priceIndex < 0.97) sentences.push("Prices fell. Goods got cheaper.");
-  else if (next.priceIndex > 1.03) sentences.push("Prices rose.");
+  const infl = next.inflation;
+  if (infl <= -0.003) sentences.push(`Prices fell ${formatPct(-infl)}.`);
+  else if (infl >= 0.003) sentences.push(`Prices rose ${formatPct(infl)}.`);
+  else sentences.push("Prices held nearly steady.");
 
   const word = stabilityWord(next.stability);
   const sd = next.stability - prev.stability;
@@ -1936,7 +2096,7 @@ function nextStability(
   },
 ): number {
   const u = econ.unemployment;
-  const price = econ.priceIndex;
+  const price = econ.goodsRatio;
   let delta = 0;
   const needs = prev.policies.stipend || prev.policies.dividend || prev.policies.ownership === "citizens";
   if (u > 0.09) delta += (0.09 - u) * (needs ? 28 : 64);
@@ -1975,8 +2135,18 @@ function nextStability(
     delta -= Math.min(18, (fiscal.debt - LOAN_SIZE) / 50_000_000);
   }
   if (treasury < 0) delta -= 4 + Math.min(12, -treasury / 8_000_000);
-  if (econ.avgWage < prev.avgWage * 0.97) delta -= 1;
-  if (econ.avgWage > prev.avgWage * 1.04 && u < 0.12) delta += 0.4;
+  const prevReal = prev.realWage || prev.avgWage;
+  if (econ.realWage < prevReal * 0.97) delta -= 1;
+  if (econ.realWage > prevReal * 1.04 && u < 0.12) delta += 0.4;
+  const infl = econ.inflation;
+  if (infl > 0.035) {
+    const excess = infl - 0.035;
+    delta -= excess * 70 + excess * excess * 350;
+  }
+  if (infl < -0.01) {
+    const gap = -0.01 - infl;
+    delta -= gap * 35 + (u > 0.08 ? gap * 25 : 0);
+  }
   const worst = worstCover(prev.covers ?? { power: 1, water: 1, waste: 1 });
   if (worst < 0.98) delta -= (0.98 - worst) * 45;
   if (prev.crime > 22) delta -= (prev.crime - 22) * 0.09;
@@ -1987,7 +2157,8 @@ function nextStability(
     fiscal.taken >= 2 ||
     fiscal.austerity ||
     fiscal.debt > 400_000_000 ||
-    treasury < 0;
+    treasury < 0 ||
+    infl > 0.1;
   delta = clamp(delta, shock ? -20 : -12, 8);
   return clamp(Math.round(prev.stability + delta), 0, 100);
 }

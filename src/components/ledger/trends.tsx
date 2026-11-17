@@ -10,7 +10,7 @@ import {
   YAxis,
 } from "recharts";
 import type { Ledger, StatuteEvent } from "@/lib/sim/engine";
-import { formatInt, formatMarks, formatPct, formatSignedInt, formatSignedMarks, formatSignedPoints, formatSignedPp } from "@/lib/sim/format";
+import { formatInt, formatMarks, formatPct, formatSignedInt, formatSignedMarks, formatSignedPct, formatSignedPoints, formatSignedPp } from "@/lib/sim/format";
 import { bookChartRows, chartRows, latestGap, statuteGroups, type SeriesId } from "@/lib/sim/trends";
 
 const SERIES: readonly { id: SeriesId; label: string; stroke: string }[] = [
@@ -23,6 +23,7 @@ const SERIES: readonly { id: SeriesId; label: string; stroke: string }[] = [
   { id: "reserveChange", label: "Reserve change", stroke: "var(--color-accent)" },
   { id: "books", label: "Books", stroke: "var(--color-ok)" },
   { id: "priceIndex", label: "Prices", stroke: "var(--color-water)" },
+  { id: "inflation", label: "Inflation", stroke: "var(--color-coral)" },
   { id: "profit", label: "Profit", stroke: "var(--color-gold)" },
   { id: "stability", label: "Stability", stroke: "var(--color-danger)" },
 ];
@@ -30,6 +31,7 @@ const SERIES: readonly { id: SeriesId; label: string; stroke: string }[] = [
 function formatValue(id: SeriesId, n: number): string {
   if (id === "unemployment") return formatPct(n);
   if (id === "priceIndex") return String(Math.round(n));
+  if (id === "inflation") return formatSignedPct(n);
   if (id === "taxRevenue" || id === "treasury" || id === "reserveChange" || id === "profit") return formatMarks(n);
   if (id === "stability") return String(Math.round(n));
   return formatInt(n);
@@ -38,6 +40,7 @@ function formatValue(id: SeriesId, n: number): string {
 function formatAxis(id: SeriesId, n: number): string {
   if (id === "unemployment") return `${Math.round(n * 100)}%`;
   if (id === "stability" || id === "priceIndex") return String(Math.round(n));
+  if (id === "inflation") return `${Math.round(n * 100)}%`;
   if (id === "avgWage" || id === "wagePerCapita") return formatMarks(n);
   return formatMarks(n);
 }
