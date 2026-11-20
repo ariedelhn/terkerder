@@ -4,6 +4,35 @@ import {
   formatPct,
   stabilityWord,
 } from "./format.ts";
+import {
+  asEnergy,
+  buildCost as powerBuildCost,
+  commitFleet,
+  freshEnergy,
+  fuelBill,
+  kindUnlocked,
+  nextOilPrice,
+  oilInflation,
+  plantMw,
+  retireFleet,
+  retireTarget,
+  powerCapacity,
+  powerJobs,
+  powerUpkeep,
+  researchBill,
+  researchDef,
+  stageRoom,
+  tickResearch,
+  upkeepFactor,
+  worksFactor,
+  chooseResearch,
+  POWER_TYPES,
+  type EnergyState,
+  type PowerKind,
+  type ResearchId,
+} from "./energy.ts";
+
+export type { EnergyState, PowerKind, ResearchId } from "./energy.ts";
 
 export const BASE_POP = 72_000;
 export const PARTICIPATION = 0.6;
@@ -106,6 +135,8 @@ export type SpendParts = {
   interest: number;
   construction: number;
   principal: number;
+  /** Energy research funded this year. Missing on older saves. */
+  research: number;
 };
 
 export type ServiceId = "power" | "water" | "waste";
@@ -218,13 +249,14 @@ export function plantUnits(plant: ServicePlant): number {
   return plant.plants + plant.auto;
 }
 
-export function plantJobs(id: ServiceId, plant: ServicePlant): number {
+export function plantJobs(id: ServiceId, plant: ServicePlant, energy?: EnergyState | null): number {
+  if (id === "power" && energy) return powerJobs(energy);
   const crew = PLANT_CREW[id];
   return Math.round(plant.plants * crew + plant.auto * crew * AUTO_JOB_SHARE);
 }
 
-export function utilityJobs(works: Works): number {
-  return SERVICES.reduce((sum, def) => sum + plantJobs(def.id, asPlant(works[def.id])), 0);
+export function utilityJobs(works: Works, energy?: EnergyState | null): number {
+  return SERVICES.reduce((sum, def) => sum + plantJobs(def.id, asPlant(works[def.id]), energy), 0);
 }
 
 /** Fixed yearly payment on a fully amortizing loan. */
@@ -334,17 +366,49 @@ export function serviceCapacity(id: ServiceId, plants: number): number {
   return def.plant * plants;
 }
 
+/** Built capacity. Power depends on the plant mix and research; water and waste on research. */
+export function capacityOf(id: ServiceId, works: Works, energy?: EnergyState | null): number {
+  if (id === "power" && energy) return powerCapacity(energy);
+  return serviceCapacity(id, plantUnits(asPlant(works[id]))) * (id === "power" ? 1 : worksFactor(energy));
+}
+
+/** Capacity one staged plant (or batch) adds next year. */
+export function stagedCapacity(id: ServiceId, works: Works, energy?: EnergyState | null): number {
+  const plant = asPlant(works[id]);
+  if (id === "power" && energy) {
+    const target = energy.retire > 0 ? retireTarget(energy) : null;
+    const lost = target ? plantMw(energy, "oil", target.auto) : 0;
+    const added = plant.staged > 0 ? plant.staged * plantMw(energy, energy.stagedKind, plant.stagedAuto) : 0;
+    return added - lost;
+  }
+  if (plant.staged <= 0) return 0;
+  return serviceCapacity(id, 1) * (id === "power" ? 1 : worksFactor(energy));
+}
+
 export function serviceCover(id: ServiceId, pop: number, jobs: number, plants: number, year = 1, machines = 0): number {
   const demand = serviceDemand(id, pop, jobs, year, machines);
   if (demand <= 0) return 1;
   return serviceCapacity(id, plants) / demand;
 }
 
-export function coverOf(pop: number, jobs: number, works: Works, year = 1, machines = 0): ServiceCover {
+function coverFrom(id: ServiceId, capacity: number, pop: number, jobs: number, year: number, machines: number): number {
+  const demand = serviceDemand(id, pop, jobs, year, machines);
+  if (demand <= 0) return 1;
+  return capacity / demand;
+}
+
+export function coverOf(
+  pop: number,
+  jobs: number,
+  works: Works,
+  year = 1,
+  machines = 0,
+  energy?: EnergyState | null,
+): ServiceCover {
   return {
-    power: serviceCover("power", pop, jobs, plantUnits(asPlant(works.power)), year, machines),
-    water: serviceCover("water", pop, jobs, plantUnits(asPlant(works.water)), year, machines),
-    waste: serviceCover("waste", pop, jobs, plantUnits(asPlant(works.waste)), year, machines),
+    power: coverFrom("power", capacityOf("power", works, energy), pop, jobs, year, machines),
+    water: coverFrom("water", capacityOf("water", works, energy), pop, jobs, year, machines),
+    waste: coverFrom("waste", capacityOf("waste", works, energy), pop, jobs, year, machines),
   };
 }
 
@@ -358,15 +422,15 @@ export type ServiceOutlook = {
 
 /** This year's use, and next year's coverage if no new plant opens. */
 export function serviceOutlook(state: Ledger, id: ServiceId): ServiceOutlook {
-  const plant = asPlant(state.works[id]);
   const machines = machineCount(state);
   const demand = serviceDemand(id, state.population, state.employed, state.year, machines);
-  const capacity = serviceCapacity(id, plantUnits(plant));
+  const energy = state.energy ?? null;
+  const capacity = capacityOf(id, state.works, energy);
   const cover = demand <= 0 ? 1 : capacity / demand;
   const nextPop = nextPopulation(state);
   const nextJobs = Math.round(state.employed * (nextPop / Math.max(1, state.population)));
   const nextDemand = serviceDemand(id, nextPop, nextJobs, state.year + 1, machines + stagedMachines(state));
-  const nextCapacity = serviceCapacity(id, plantUnits(plant) + (plant.staged > 0 ? 1 : 0));
+  const nextCapacity = capacity + stagedCapacity(id, state.works, energy);
   const nextCover = nextDemand <= 0 ? 1 : nextCapacity / nextDemand;
   return { demand, capacity, cover, nextDemand, nextCover };
 }
@@ -411,6 +475,8 @@ export type YearMark = {
   realWage?: number;
   /** Yearly inflation rate, e.g. 0.02 for 2%. */
   inflation?: number;
+  /** Real price of imported oil, 1 at the census. */
+  oilPrice?: number;
 };
 
 export type AgeId = "children" | "teens" | "adults" | "seniors";
@@ -487,6 +553,8 @@ export type Ledger = {
   policies: Policies;
   techs: Record<TechId, TechState>;
   works: Works;
+  /** Power plant mix, energy research, and the oil price. */
+  energy: EnergyState;
   /** 100 at the opening census. Cumulative price level. */
   priceIndex: number;
   /** Yearly inflation rate, e.g. 0.02 for 2%. */
@@ -736,6 +804,7 @@ function emptySpend(): SpendParts {
     interest: 0,
     construction: 0,
     principal: 0,
+    research: 0,
   };
 }
 
@@ -884,6 +953,7 @@ export function programCosts(pop: number, unemployed: number): SpendParts {
     interest: 0,
     construction: 0,
     principal: 0,
+    research: 0,
   };
 }
 
@@ -960,6 +1030,8 @@ export type PriceDrivers = {
   deficit: number;
   transfers: number;
   moneyFinancing: number;
+  /** Inflation pushed by imported oil prices. */
+  oilShock?: number;
 };
 
 /** This year's inflation rate. A balanced city stays near the 2% target. */
@@ -992,7 +1064,9 @@ export function yearInflation(input: PriceDrivers): number {
   const abundanceLevel = (input.goodsRatio - 1) * 0.02;
   const abundanceDelta = Math.min(0, input.goodsRatio - input.prevGoodsRatio) * 0.1;
 
-  return clamp(expected + phillips + demand + supply + abundanceLevel + abundanceDelta, -0.08, 1.2);
+  const oil = Number.isFinite(input.oilShock) ? (input.oilShock ?? 0) : 0;
+
+  return clamp(expected + phillips + demand + supply + oil + abundanceLevel + abundanceDelta, -0.08, 1.2);
 }
 
 export function nextPriceIndex(prev: number, inflation: number): number {
@@ -1032,6 +1106,7 @@ function desiredSlots(
   year: number,
   climate?: number,
   works?: Works,
+  energy?: EnergyState | null,
 ): number[] {
   const forces = yearForces(year);
   const cheap = clamp(1 - priceRatio(techs), 0, 0.45);
@@ -1082,7 +1157,7 @@ function desiredSlots(
     }
     // City plants are real jobs: power crews in energy, water and waste in government.
     if (works) {
-      if (sector.id === "energy") slots += plantJobs("power", asPlant(works.power));
+      if (sector.id === "energy") slots += plantJobs("power", asPlant(works.power), energy);
       if (sector.id === "government") {
         slots += plantJobs("water", asPlant(works.water));
         slots += plantJobs("waste", asPlant(works.waste));
@@ -1125,8 +1200,10 @@ function project(args: {
   /** When false, unemployment may jump. Statutes and new automation steps use that. */
   gentle: boolean;
   climate: number;
-  serviceSpend: { services: number; interest: number; principal: number; construction: number };
+  serviceSpend: { services: number; interest: number; principal: number; construction: number; research?: number };
   works: Works;
+  energy?: EnergyState | null;
+  oilShock?: number;
   /** Last year's cumulative price index (100 at census). */
   priceLevel?: number;
   /** Last year's nominal wage scale (1 at census). */
@@ -1157,7 +1234,7 @@ function project(args: {
 
   const ages = cityAges(args.pop, participation);
   const laborForce = Math.max(1, lookingCount(ages));
-  const wantedRaw = desiredSlots(args.pop, args.policies, args.techs, args.year, args.climate, args.works);
+  const wantedRaw = desiredSlots(args.pop, args.policies, args.techs, args.year, args.climate, args.works, args.energy);
   const wanted = Math.round(sumOf(wantedRaw));
   const fillCap = Math.max(0, Math.round(laborForce * (1 - forces.friction)));
   const structuralTotal = Math.min(wanted, fillCap, laborForce);
@@ -1248,6 +1325,7 @@ function project(args: {
       interest: args.serviceSpend.interest,
       construction: Math.round(args.serviceSpend.construction * cola),
       principal: args.serviceSpend.principal,
+      research: Math.round((args.serviceSpend.research ?? 0) * cola),
     };
     const spending = spendTotal(spend);
     return { avgWage, profit, taxRevenue, spend, spending };
@@ -1276,6 +1354,7 @@ function project(args: {
       deficit: first.spending - first.taxRevenue,
       transfers: first.spend.stipend + first.spend.dividend + first.spend.works,
       moneyFinancing,
+      oilShock: args.oilShock,
     });
     priceIndex = nextPriceIndex(priceLevel0, inflation);
     wageScale = nextWageScale(prevWageScale, inflation);
@@ -1356,13 +1435,15 @@ export function openingState(charter: CharterId = "census"): Ledger {
     climate: 1,
     serviceSpend: { services: 0, interest: 0, principal: 0, construction: 0 },
     works: openingWorks(),
+    energy: freshEnergy(),
     priceLevel: PRICE_CENSUS,
     wageScale: 1,
     prevInflation: INFLATION_TARGET,
     freezePrices: true,
   });
   const openingWorksState = openingWorks();
-  const openingCovers = coverOf(BASE_POP, census.employed, openingWorksState);
+  const openingEnergy = freshEnergy(openingWorksState.power.plants, openingWorksState.power.auto);
+  const openingCovers = coverOf(BASE_POP, census.employed, openingWorksState, 1, 0, openingEnergy);
   const base: Ledger = {
     version: 1,
     year: 1,
@@ -1381,6 +1462,7 @@ export function openingState(charter: CharterId = "census"): Ledger {
     policies: policiesFor(charter),
     techs: techsFor(charter),
     works: openingWorksState,
+    energy: openingEnergy,
     priceIndex: census.priceIndex,
     inflation: INFLATION_TARGET,
     wageScale: 1,
@@ -1459,17 +1541,25 @@ function enactedTechMap(techs: Record<TechId, TechState>): Record<TechId, boolea
   return flags;
 }
 
-export function serviceBill(works: Works): Record<ServiceId, number> {
+/** Yearly running cost of each utility at census prices. Power includes imported fuel. */
+export function serviceBill(works: Works, energy?: EnergyState | null): Record<ServiceId, number> {
   const bill: Record<ServiceId, number> = { power: 0, water: 0, waste: 0 };
+  const upkeep = upkeepFactor(energy);
   for (const def of SERVICES) {
+    if (def.id === "power" && energy) {
+      bill.power = powerUpkeep(energy) + fuelBill(energy);
+      continue;
+    }
     const plant = asPlant(works[def.id]);
-    bill[def.id] = Math.round(def.yearlyCost * plant.plants + def.yearlyCost * AUTO_COST_SHARE * plant.auto);
+    bill[def.id] = Math.round(
+      (def.yearlyCost * plant.plants + def.yearlyCost * AUTO_COST_SHARE * plant.auto) * (def.id === "power" ? 1 : upkeep),
+    );
   }
   return bill;
 }
 
 export function snapshot(state: Ledger): YearMark {
-  const bill = serviceBill(state.works);
+  const bill = serviceBill(state.works, state.energy);
   return {
     year: state.year,
     unemployment: state.unemployment,
@@ -1485,6 +1575,7 @@ export function snapshot(state: Ledger): YearMark {
     profit: state.profit,
     realWage: state.realWage,
     inflation: state.inflation,
+    oilPrice: state.energy?.oilPrice ?? 1,
     powerCost: bill.power,
     waterCost: bill.water,
     wasteCost: bill.waste,
@@ -1493,12 +1584,12 @@ export function snapshot(state: Ledger): YearMark {
 
 type TrailInput = Omit<
   Ledger,
-  "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale"
+  "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale" | "energy"
 > &
   Partial<
     Pick<
       Ledger,
-      "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale"
+      "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale" | "energy"
     >
   >;
 
@@ -1517,9 +1608,10 @@ export function ensureTrail(state: TrailInput): Ledger {
     water: asPlant(state.works?.water, openingWorks().water),
     waste: asPlant(state.works?.waste, openingWorks().waste),
   };
+  const energy = asEnergy(state.energy, works.power);
   const loans = state.loans ?? loansFromBalance(state.debt ?? 0);
   const debt = debtOf(loans);
-  const covers = state.covers ?? coverOf(state.population, state.employed, works);
+  const covers = state.covers ?? coverOf(state.population, state.employed, works, state.year, 0, energy);
   const history = (state.history?.length ? state.history : []).map((mark, index, all) => {
     const isCurrent = index === all.length - 1 && mark.year === state.year;
     const laborForce =
@@ -1551,6 +1643,7 @@ export function ensureTrail(state: TrailInput): Ledger {
     enactedTech,
     ages,
     works,
+    energy,
     loans,
     debt,
     crime: state.crime ?? crimeIndex(state.unemployment, worstCover(covers), state.policies.stipend || state.policies.dividend),
@@ -1566,6 +1659,10 @@ export function ensureTrail(state: TrailInput): Ledger {
           inflation: state.shadow.inflation ?? INFLATION_TARGET,
           wageScale: state.shadow.wageScale ?? 1,
           priceIndex: state.shadow.priceIndex ?? PRICE_CENSUS,
+          energy: asEnergy(
+            state.shadow.energy,
+            asPlant(state.shadow.works?.power, openingWorks().power),
+          ),
         }
       : null,
     pace: state.pace ?? null,
@@ -1631,27 +1728,38 @@ function businessClimate(covers: ServiceCover, protest: boolean): number {
   return factor;
 }
 
-function serviceOpex(works: Works): number {
-  const bill = serviceBill(works);
+function serviceOpex(works: Works, energy: EnergyState): number {
+  const bill = serviceBill(works, energy);
   return bill.power + bill.water + bill.waste;
 }
 
-function serviceCapex(works: Works): number {
-  return SERVICES.reduce((sum, def) => sum + def.buildCost * asPlant(works[def.id]).staged, 0);
+function serviceCapex(works: Works, energy: EnergyState): number {
+  return SERVICES.reduce((sum, def) => {
+    const staged = asPlant(works[def.id]).staged;
+    if (def.id === "power") return sum + powerBuildCost(energy.stagedKind, staged);
+    return sum + def.buildCost * Math.min(1, staged);
+  }, 0);
 }
 
-function commitWorks(works: Works): Works {
+function commitWorks(works: Works, energy: EnergyState): { works: Works; energy: EnergyState } {
   const next = {} as Works;
+  const retired = retireFleet(energy);
+  let fleet = retired.energy;
+  const closed = retired.closed;
   for (const def of SERVICES) {
     const plant = asPlant(works[def.id]);
+    const count = def.id === "power" ? plant.staged : Math.min(1, plant.staged);
+    const lostCrew = def.id === "power" && closed && !closed.auto ? 1 : 0;
+    const lostAuto = def.id === "power" && closed && closed.auto ? 1 : 0;
     next[def.id] = {
-      plants: plant.plants + (plant.staged > 0 && !plant.stagedAuto ? 1 : 0),
-      auto: plant.auto + (plant.staged > 0 && plant.stagedAuto ? 1 : 0),
+      plants: Math.max(0, plant.plants - lostCrew) + (count > 0 && !plant.stagedAuto ? count : 0),
+      auto: Math.max(0, plant.auto - lostAuto) + (count > 0 && plant.stagedAuto ? count : 0),
       staged: plant.staged,
       stagedAuto: plant.stagedAuto,
     };
+    if (def.id === "power" && count > 0) fleet = commitFleet(fleet, energy.stagedKind, count, plant.stagedAuto);
   }
-  return next;
+  return { works: next, energy: fleet };
 }
 
 function clearStaged(works: Works): Works {
@@ -1663,17 +1771,26 @@ function clearStaged(works: Works): Works {
   return next;
 }
 
-function plantLabels(works: Works): string[] {
+function plantLabels(works: Works, energy?: EnergyState | null): string[] {
   const labels: string[] = [];
+  if (energy && energy.retire > 0 && retireTarget(energy)) labels.push("Oil plant closed");
   for (const def of SERVICES) {
     const plant = asPlant(works[def.id]);
     if (plant.staged <= 0) continue;
+    if (def.id === "power" && energy) {
+      const type = POWER_TYPES[energy.stagedKind];
+      const what = plant.staged > 1 ? `${plant.staged} ${type.plural}` : type.name.toLowerCase();
+      const label = plant.stagedAuto ? `Automated ${what}` : what.charAt(0).toUpperCase() + what.slice(1);
+      labels.push(`${label} opened`);
+      continue;
+    }
     labels.push(plant.stagedAuto ? `Automated ${def.name.toLowerCase()} plant opened` : `${def.name} plant opened`);
   }
   return labels;
 }
 
 export function stageService(state: Ledger, id: ServiceId, kind: "crew" | "auto" = "crew"): Ledger {
+  if (id === "power" && state.energy) return stagePower(state, state.energy.stagedKind ?? "oil", kind);
   const current = asPlant(state.works[id]);
   const wantAuto = kind === "auto";
   const same = current.staged > 0 && current.stagedAuto === wantAuto;
@@ -1689,6 +1806,47 @@ export function stageService(state: Ledger, id: ServiceId, kind: "crew" | "auto"
       },
     },
   };
+}
+
+/**
+ * Stage a power plant of one type. Tapping the same choice again adds another
+ * (solar allows three a year) and then cancels. Locked types are ignored.
+ */
+export function stagePower(state: Ledger, kind: PowerKind, mode: "crew" | "auto" = "crew"): Ledger {
+  const energy = asEnergy(state.energy, asPlant(state.works.power));
+  const room = stageRoom(energy, kind);
+  const current = asPlant(state.works.power);
+  const wantAuto = mode === "auto";
+  const same = current.staged > 0 && current.stagedAuto === wantAuto && energy.stagedKind === kind;
+  if (!same && (room <= 0 || !kindUnlocked(energy, kind))) return state;
+  const staged = same ? (current.staged < room ? current.staged + 1 : 0) : 1;
+  return {
+    ...state,
+    energy: { ...energy, stagedKind: staged > 0 ? kind : energy.stagedKind },
+    works: {
+      ...state.works,
+      power: {
+        plants: current.plants,
+        auto: current.auto,
+        staged,
+        stagedAuto: staged > 0 ? wantAuto : false,
+      },
+    },
+  };
+}
+
+/** Stage (or cancel) closing one oil plant at the next year close. */
+export function retireOil(state: Ledger): Ledger {
+  const energy = asEnergy(state.energy, asPlant(state.works.power));
+  if (energy.retire > 0) return { ...state, energy: { ...energy, retire: 0 } };
+  if (!retireTarget(energy)) return state;
+  return { ...state, energy: { ...energy, retire: 1 } };
+}
+
+/** Fund an energy research project at the next year close, or stop funding with null. */
+export function setResearch(state: Ledger, id: ResearchId | null): Ledger {
+  const energy = asEnergy(state.energy, asPlant(state.works.power));
+  return { ...state, energy: chooseResearch(energy, id) };
 }
 
 export function borrow(state: Ledger): Ledger {
@@ -1743,7 +1901,8 @@ function spendTotal(spend: SpendParts): number {
     spend.services +
     spend.interest +
     spend.principal +
-    spend.construction
+    spend.construction +
+    (spend.research ?? 0)
   );
 }
 
@@ -1753,6 +1912,7 @@ function trimDiscretionary(spend: SpendParts, need: number): { spend: SpendParts
   const cut: string[] = [];
   let left = Math.max(0, need);
   const order: readonly { key: keyof SpendParts; label: string }[] = [
+    { key: "research", label: "Research paused" },
     { key: "construction", label: "Plant construction halted" },
     { key: "dividend", label: "Dividend suspended" },
     { key: "works", label: "Public works suspended" },
@@ -1795,12 +1955,19 @@ function settle(
   const deepening = TECHS.some(
     (tech) => ramp(techs[tech.id].activeYears) > ramp(state.techs[tech.id].activeYears),
   );
-  const builtWorks = book ? commitWorks(state.works) : state.works;
-  const opened = book ? plantLabels(state.works) : [];
+  const energy0 = asEnergy(state.energy, asPlant(state.works.power));
+  const committed = book ? commitWorks(state.works, energy0) : { works: state.works, energy: energy0 };
+  const builtWorks = committed.works;
+  const opened = book ? plantLabels(state.works, energy0) : [];
+  const oilPrice = nextOilPrice(energy0.oilPrice, state.year + 1);
+  const oilShock = oilInflation(committed.energy, oilPrice);
+  const researchCost = book ? researchBill(energy0) : 0;
+  // Research finishes at this close; its effects count from the new year.
+  const priced = { ...committed.energy, oilPrice };
   const jobsForDemand = state.employed;
   const billed = serviceLoans(state.loans ?? []);
   const machines = machineCount(state) + stagedMachines({ techs });
-  const covers = coverOf(population, jobsForDemand, builtWorks, state.year + 1, machines);
+  const covers = coverOf(population, jobsForDemand, builtWorks, state.year + 1, machines, priced);
   const needsMet = policies.stipend || policies.dividend || policies.ownership === "citizens";
   const protest = willProtest(covers, state.unemployment, state.stability, needsMet);
   const gentle = !deepening && statuteLabels(state, techs).length === 0 && !protest && worstCover(covers) >= 0.95;
@@ -1815,12 +1982,15 @@ function settle(
     gentle,
     climate: businessClimate(covers, protest),
     serviceSpend: {
-      services: serviceOpex(builtWorks),
+      services: serviceOpex(builtWorks, priced),
       interest: billed.interest,
       principal: billed.principal,
-      construction: book ? serviceCapex(state.works) : 0,
+      construction: book ? serviceCapex(state.works, energy0) : 0,
+      research: researchCost,
     },
     works: builtWorks,
+    energy: priced,
+    oilShock,
     priceLevel: state.priceIndex ?? PRICE_CENSUS,
     wageScale: state.wageScale ?? 1,
     prevInflation: state.inflation ?? INFLATION_TARGET,
@@ -1836,6 +2006,8 @@ function settle(
   loans = rescue.loans;
   let openedPlants = opened;
   let finalWorks = builtWorks;
+  let finalEnergy = priced;
+  let researchFunded = researchCost > 0;
   let austerity: string[] = [];
   if (treasury < 0) {
     const trimmed = trimDiscretionary(withCrews.spend, -treasury);
@@ -1843,11 +2015,16 @@ function settle(
     const cancelledBuild = withCrews.spend.construction > 0 && trimmed.spend.construction < withCrews.spend.construction;
     if (cancelledBuild) {
       finalWorks = state.works;
+      finalEnergy = { ...energy0, oilPrice, retire: 0 };
       openedPlants = [];
     }
+    if (withCrews.spend.research > 0 && trimmed.spend.research < withCrews.spend.research) researchFunded = false;
     withCrews = { ...withCrews, spend: trimmed.spend, spending: spendTotal(trimmed.spend) };
     treasury = state.treasury + withCrews.taxRevenue - withCrews.spending + rescue.taken.length * LOAN_SIZE;
   }
+  const researched = book ? tickResearch(finalEnergy, researchFunded) : { energy: finalEnergy, finished: null };
+  finalEnergy = researched.energy;
+  const researchLabels = researched.finished ? [`Research done · ${researchDef(researched.finished).name}`] : [];
   const crime = crimeIndex(withCrews.unemployment, worstCover(covers), needsMet);
   const stability = nextStability(
     { ...state, policies, crime, protest, covers },
@@ -1868,6 +2045,7 @@ function settle(
     ? [
         ...statuteLabels(state, techs),
         ...openedPlants,
+        ...researchLabels,
         ...(protest ? ["Protest"] : []),
         ...(austerity.length > 0 ? ["Austerity"] : []),
       ]
@@ -1890,6 +2068,7 @@ function settle(
     policies,
     techs,
     works: clearStaged(finalWorks),
+    energy: finalEnergy,
     priceIndex: withCrews.priceIndex,
     inflation: withCrews.inflation,
     wageScale: withCrews.wageScale,
@@ -1908,6 +2087,8 @@ function settle(
           opened: openedPlants,
           loans: rescue.taken.map((loan) => `Loan ${loan.name} at ${(loan.rate * 100).toFixed(1)}%`),
           austerity,
+          research: researched.finished ? researchDef(researched.finished).name : null,
+          oil: { from: energy0.oilPrice, to: oilPrice, share: oilShock !== 0 || energy0.fleet.oil.crew + energy0.fleet.oil.auto > 0 },
         })
       : "",
     hasClosedYear: true,
@@ -1998,7 +2179,15 @@ function writeBulletin(
   prev: Ledger,
   next: Project & { stability: number; treasury: number },
   newTechNames: string[],
-  city?: { protest: boolean; covers: ServiceCover; opened: string[]; loans?: string[]; austerity?: string[] },
+  city?: {
+    protest: boolean;
+    covers: ServiceCover;
+    opened: string[];
+    loans?: string[];
+    austerity?: string[];
+    research?: string | null;
+    oil?: { from: number; to: number; share: boolean };
+  },
 ): string {
   let worst: { name: string; delta: number } | null = null;
   for (const sector of next.sectors) {
@@ -2069,7 +2258,13 @@ function writeBulletin(
   const stable = sentences.find((line) => line.startsWith("Stability")) ?? "";
   const cityLines: string[] = [];
   if (city?.opened.length) cityLines.push(`${listNames(city.opened.map((line) => line.replace(" opened", "")))} opened.`);
+  if (city?.research) cityLines.push(`${city.research} research is done.`);
   if (city?.austerity?.length) cityLines.push(`${city.austerity[0]}.`);
+  if (city?.oil?.share && city.oil.from > 0) {
+    const move = city.oil.to / city.oil.from - 1;
+    if (move >= 0.07) cityLines.push(`Oil import prices jumped ${formatPct(move)}.`);
+    else if (move <= -0.07) cityLines.push(`Oil import prices fell ${formatPct(-move)}.`);
+  }
   if (city?.protest) cityLines.push("A protest broke out. Some firms left.");
   else if (city) {
     const short = SERVICES.find((def) => city.covers[def.id] < 0.98);

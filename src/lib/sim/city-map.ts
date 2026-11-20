@@ -1,4 +1,11 @@
 import {
+  asEnergy,
+  researchDone,
+  SOLAR_PER_BATTERY_TILE,
+  type EnergyState,
+  type PowerKind,
+} from "./energy.ts";
+import {
   asPlant,
   openingWorks,
   type Ledger,
@@ -23,6 +30,9 @@ export type BuildingKind =
   | "shop"
   | "dock"
   | "power"
+  | "solar"
+  | "battery"
+  | "tidal"
   | "water"
   | "waste"
   | "data"
@@ -58,6 +68,10 @@ export type CityMapModel = {
     waste: number;
     data: number;
     automatedPlants: number;
+    oil: number;
+    solar: number;
+    tidal: number;
+    batteries: number;
   };
 };
 
@@ -180,6 +194,18 @@ const BRIDGES: readonly Point[] = [
   [9, 6],
 ];
 
+/** Tidal stations sit in the sea along the shore, clear of the piers and the river mouth. */
+const TIDAL_SLOTS: readonly Point[] = [
+  [13, 3],
+  [13, 4],
+  [13, 2],
+  [13, 13],
+  [13, 14],
+  [13, 12],
+  [13, 1],
+  [13, 15],
+];
+
 const PLANT_SLOTS: Record<ServiceId, readonly Point[]> = {
   power: POWER_SLOTS,
   water: WATER_SLOTS,
@@ -283,6 +309,28 @@ function worksOf(ledger: Ledger): Works {
     waste: asPlant(ledger.works?.waste, fallback.waste),
   };
 }
+
+function energyOf(ledger: Ledger, works: Works): EnergyState {
+  return asEnergy(ledger.energy, works.power);
+}
+
+export function batteryTiles(energy: EnergyState): number {
+  if (!researchDone(energy, "batteries")) return 0;
+  const solar = energy.fleet.solar.crew + energy.fleet.solar.auto;
+  return Math.ceil(solar / SOLAR_PER_BATTERY_TILE);
+}
+
+const POWER_LABEL: Record<PowerKind, string> = {
+  oil: "Oil plant",
+  solar: "Solar farm",
+  tidal: "Tidal station",
+};
+
+const POWER_TILE: Record<PowerKind, BuildingKind> = {
+  oil: "power",
+  solar: "solar",
+  tidal: "tidal",
+};
 
 export function machineCount(ledger: Ledger): number {
   return (ledger.sectors ?? []).reduce((sum, sector) => sum + (sector.automatons ?? 0), 0);
@@ -417,25 +465,60 @@ export function buildCityMap(ledger: Ledger): CityMapModel {
   }
 
   const works = worksOf(ledger);
+  const energy = energyOf(ledger, works);
   let automatedPlants = 0;
-  for (const id of ["power", "water", "waste"] as const) {
-    const slots = PLANT_SLOTS[id];
-    const { staffed, automated, staged, stagedAuto } = plantKind(id, works[id]);
+  const putter = (slots: readonly Point[], kind: BuildingKind) => {
     let slot = 0;
-    const put = (flags: { automated: boolean; staged: boolean }, label: string) => {
+    return (flags: { automated: boolean; staged: boolean }, label: string) => {
       const point = slots[slot];
       if (!point) return;
       const [x, y] = point;
-      place(x, y, {
-        kind: id,
-        density: 1,
-        automated: flags.automated,
-        staged: flags.staged,
-        label,
-      });
+      place(x, y, { kind, density: 1, automated: flags.automated, staged: flags.staged, label });
       slot += 1;
-      if (flags.automated && !flags.staged) automatedPlants += 1;
+      if (flags.automated && !flags.staged && kind !== "battery") automatedPlants += 1;
     };
+  };
+
+  // Power: oil, then solar and its battery banks share the north-west yard; tidal sits in the sea.
+  const yard = { slot: 0 };
+  const putYard = (kind: BuildingKind, flags: { automated: boolean; staged: boolean }, label: string) => {
+    const point = POWER_SLOTS[yard.slot];
+    if (!point) return;
+    const [x, y] = point;
+    place(x, y, { kind, density: 1, automated: flags.automated, staged: flags.staged, label });
+    yard.slot += 1;
+    if (flags.automated && !flags.staged && kind !== "battery") automatedPlants += 1;
+  };
+  const putTidal = putter(TIDAL_SLOTS, "tidal");
+  const closing = energy.retire > 0 ? (energy.fleet.oil.crew > 0 ? "crew" : "auto") : null;
+  for (let i = 0; i < energy.fleet.oil.crew; i += 1) {
+    const last = closing === "crew" && i === energy.fleet.oil.crew - 1;
+    putYard("power", { automated: false, staged: false }, `Oil plant · staffed${last ? " · closing at year end" : ""}`);
+  }
+  for (let i = 0; i < energy.fleet.oil.auto; i += 1) {
+    const last = closing === "auto" && i === energy.fleet.oil.auto - 1;
+    putYard("power", { automated: true, staged: false }, `Oil plant · automated${last ? " · closing at year end" : ""}`);
+  }
+  for (let i = 0; i < energy.fleet.solar.crew; i += 1) putYard("solar", { automated: false, staged: false }, "Solar farm · staffed");
+  for (let i = 0; i < energy.fleet.solar.auto; i += 1) putYard("solar", { automated: true, staged: false }, "Solar farm · automated");
+  const batteries = batteryTiles(energy);
+  for (let i = 0; i < batteries; i += 1) putYard("battery", { automated: false, staged: false }, "Battery bank");
+  for (let i = 0; i < energy.fleet.tidal.crew; i += 1) putTidal({ automated: false, staged: false }, "Tidal station · staffed");
+  for (let i = 0; i < energy.fleet.tidal.auto; i += 1) putTidal({ automated: true, staged: false }, "Tidal station · automated");
+  const power = works.power;
+  if (power.staged > 0) {
+    const kind = energy.stagedKind;
+    const label = `${POWER_LABEL[kind]} · under construction${power.stagedAuto ? " · automated" : ""}`;
+    for (let i = 0; i < power.staged; i += 1) {
+      if (kind === "tidal") putTidal({ automated: power.stagedAuto, staged: true }, label);
+      else putYard(POWER_TILE[kind], { automated: power.stagedAuto, staged: true }, label);
+    }
+  }
+
+  for (const id of ["water", "waste"] as const) {
+    const slots = PLANT_SLOTS[id];
+    const { staffed, automated, staged, stagedAuto } = plantKind(id, works[id]);
+    const put = putter(slots, id);
     for (let i = 0; i < staffed; i += 1)
       put({ automated: false, staged: false }, `${PLANT_LABEL[id]} · staffed`);
     for (let i = 0; i < automated; i += 1)
@@ -468,6 +551,10 @@ export function buildCityMap(ledger: Ledger): CityMapModel {
       waste: works.waste.plants + works.waste.auto,
       data: dataWanted,
       automatedPlants,
+      oil: energy.fleet.oil.crew + energy.fleet.oil.auto,
+      solar: energy.fleet.solar.crew + energy.fleet.solar.auto,
+      tidal: energy.fleet.tidal.crew + energy.fleet.tidal.auto,
+      batteries,
     },
   };
 }
@@ -476,6 +563,7 @@ export const MAP_LAYOUT = {
   homeLots: HOME_LOTS.length,
   shopLots: SHOP_LOTS.length,
   powerSlots: POWER_SLOTS.length,
+  tidalSlots: TIDAL_SLOTS.length,
   waterSlots: WATER_SLOTS.length,
   wasteSlots: WASTE_SLOTS.length,
   dataSlots: DATA_SLOTS.length,

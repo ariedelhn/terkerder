@@ -38,7 +38,10 @@ import {
   plantJobs,
   prepay,
   programCosts,
+  retireOil,
   sectorDef,
+  setResearch,
+  stagePower,
   serviceOutlook,
   serviceBill,
   stageService,
@@ -52,6 +55,30 @@ import {
   type ServiceId,
   type TechId,
 } from "@/lib/sim/engine";
+import {
+  MAX_TIDAL,
+  POWER_KINDS,
+  POWER_TYPES,
+  RESEARCH,
+  fuelBill,
+  kindUnlocked,
+  oilCount,
+  oilShare,
+  plantCrew,
+  plantFuel,
+  plantMw,
+  plantUpkeep,
+  powerUpkeep,
+  researchDef,
+  researchStatus,
+  retireTarget,
+  stageRoom,
+  tidalCount,
+  upkeepFactor,
+  worksFactor,
+  type PowerKind,
+  type ResearchId,
+} from "@/lib/sim/energy";
 import {
   formatInt,
   formatMarks,
@@ -67,7 +94,17 @@ import { loadLedger, loadSaves, rememberCity, forgetSave, saveLedger, type CityS
 import { Trends } from "@/components/ledger/trends";
 import { CityMap } from "@/components/ledger/city-map";
 
-type Tab = "sectors" | "city" | "policy" | "technology" | "people" | "figures" | "charts" | "map" | "expenses";
+type Tab =
+  | "sectors"
+  | "city"
+  | "policy"
+  | "technology"
+  | "research"
+  | "people"
+  | "figures"
+  | "charts"
+  | "map"
+  | "expenses";
 
 const SECTOR_TEXT: Record<SectorId, string> = {
   housing: "text-gold",
@@ -107,7 +144,7 @@ const SECTOR_ICON: Record<SectorId, LucideIcon> = {
 
 export function Dashboard() {
   const [ledger, setLedger] = useState<Ledger>(() => openingState());
-  const [tab, setTab] = useState<Tab>("figures");
+  const [tab, setTab] = useState<Tab>("map");
   const [confirming, setConfirming] = useState(false);
   const [savesOpen, setSavesOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -320,6 +357,7 @@ export function Dashboard() {
               <TabButton id="city" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="City" />
               <TabButton id="policy" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="Policy" />
               <TabButton id="technology" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="Auto" />
+              <TabButton id="research" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="Research" />
               <TabButton id="people" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="People" />
               <TabButton id="figures" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="Figures" />
               <TabButton id="charts" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="Charts" />
@@ -433,12 +471,22 @@ export function Dashboard() {
           <CityList
             ledger={ledger}
             onStage={(id, kind) => setLedger((current) => stageService(current, id, kind))}
+            onStagePower={(kind, mode) => setLedger((current) => stagePower(current, kind, mode))}
+            onRetire={() => setLedger((current) => retireOil(current))}
+            onOpenResearch={() => selectTab("research")}
             onBorrow={() => setLedger((current) => borrow(current))}
             onPrepay={(id, amount) => setLedger((current) => prepay(current, id, amount))}
           />
         ) : null}
         {tab === "policy" ? (
           <PolicyList ledger={ledger} costs={costs} onPolicy={setPolicy} />
+        ) : null}
+        {tab === "research" ? (
+          <ResearchList
+            ledger={ledger}
+            onPick={(id) => setLedger((current) => setResearch(current, id))}
+            onOpenCity={() => selectTab("city")}
+          />
         ) : null}
         {tab === "technology" ? (
           <TechList
@@ -709,19 +757,26 @@ export function Dashboard() {
 }
 
 function Expenses({ ledger }: { ledger: Ledger }) {
-  const bill = serviceBill(ledger.works);
+  const bill = serviceBill(ledger.works, ledger.energy);
+  const fuel = fuelBill(ledger.energy);
   const rows = [...ledger.history].reverse().filter((mark) => typeof mark.powerCost === "number");
   return (
     <section className="rounded-xl border border-border bg-card px-4 py-4" aria-label="Utility expenses">
       <h2 className="font-sans text-lg font-semibold">Utility bills</h2>
       <p className="mt-1 text-sm text-muted-foreground">
-        What the plants cost to run each year. Staffed plants cost the full rate. Automated plants cost half.
+        What the plants cost to run each year, at census prices. Staffed plants cost the full rate. Automated plants cost half to keep up. Oil plants also burn imported fuel.
       </p>
       <dl className="mt-4 flex flex-col gap-3 text-base">
         <div className="flex items-baseline justify-between gap-3">
           <dt className="text-gold">Electricity</dt>
           <dd className="tabular-nums">{formatMarks(bill.power)}</dd>
         </div>
+        {fuel > 0 ? (
+          <div className="flex items-baseline justify-between gap-3 text-sm text-muted-foreground">
+            <dt>of which imported oil</dt>
+            <dd className="tabular-nums">{formatMarks(fuel)}</dd>
+          </div>
+        ) : null}
         <div className="flex items-baseline justify-between gap-3">
           <dt className="text-water">Water</dt>
           <dd className="tabular-nums">{formatMarks(bill.water)}</dd>
@@ -969,11 +1024,17 @@ function ServiceMeters({ ledger, onOpen }: { ledger: Ledger; onOpen: () => void 
 function CityList({
   ledger,
   onStage,
+  onStagePower,
+  onRetire,
+  onOpenResearch,
   onBorrow,
   onPrepay,
 }: {
   ledger: Ledger;
   onStage: (id: ServiceId, kind: "crew" | "auto") => void;
+  onStagePower: (kind: PowerKind, mode: "crew" | "auto") => void;
+  onRetire: () => void;
+  onOpenResearch: () => void;
   onBorrow: () => void;
   onPrepay: (id: string, amount: number) => void;
 }) {
@@ -988,6 +1049,17 @@ function CityList({
           : " It climbs when people are out of work or a service runs short."}
       </p>
       {SERVICES.map((def) => {
+        if (def.id === "power") {
+          return (
+            <PowerCard
+              key={def.id}
+              ledger={ledger}
+              onStage={onStagePower}
+              onRetire={onRetire}
+              onOpenResearch={onOpenResearch}
+            />
+          );
+        }
         const plant = ledger.works[def.id];
         const look = serviceOutlook(ledger, def.id);
         const tone = SERVICE_TONE[def.id];
@@ -1014,7 +1086,7 @@ function CityList({
                   {plantJobs(def.id, plant)} government jobs · {plant.plants} staffed · {plant.auto ?? 0} automated
                   {plant.staged > 0 ? " · one plant staged" : ""}
                   {" · "}
-                  {formatMarks(def.yearlyCost * plant.plants + def.yearlyCost * 0.5 * (plant.auto ?? 0))} crypto coins a year
+                  {formatMarks(serviceBill(ledger.works, ledger.energy)[def.id])} crypto coins a year
                 </p>
               </div>
             </div>
@@ -1029,7 +1101,7 @@ function CityList({
                 </span>
                 {plant.staged > 0 && !plant.stagedAuto ? null : (
                   <span className="text-sm">
-                    {formatMarks(def.buildCost)} to build · {formatMarks(def.yearlyCost)} a year · +{formatService(def.plant, def.unit)}
+                    {formatMarks(def.buildCost)} to build · {formatMarks(def.yearlyCost * upkeepFactor(ledger.energy))} a year · +{formatService(def.plant * worksFactor(ledger.energy), def.unit)}
                   </span>
                 )}
               </button>
@@ -1045,7 +1117,7 @@ function CityList({
                 </span>
                 {plant.staged > 0 && plant.stagedAuto ? null : (
                   <span className="text-sm">
-                    {formatMarks(def.buildCost)} to build · {formatMarks(def.yearlyCost * 0.5)} a year · +{formatService(def.plant, def.unit)}
+                    {formatMarks(def.buildCost)} to build · {formatMarks(def.yearlyCost * 0.5 * upkeepFactor(ledger.energy))} a year · +{formatService(def.plant * worksFactor(ledger.energy), def.unit)}
                   </span>
                 )}
               </button>
@@ -1117,6 +1189,277 @@ function CityList({
         </div>
       </article>
     </div>
+  );
+}
+
+const KIND_TONE: Record<PowerKind, string> = {
+  oil: "text-coral",
+  solar: "text-water",
+  tidal: "text-ok",
+};
+
+function PowerCard({
+  ledger,
+  onStage,
+  onRetire,
+  onOpenResearch,
+}: {
+  ledger: Ledger;
+  onStage: (kind: PowerKind, mode: "crew" | "auto") => void;
+  onRetire: () => void;
+  onOpenResearch: () => void;
+}) {
+  const energy = ledger.energy;
+  const plant = ledger.works.power;
+  const def = SERVICES.find((item) => item.id === "power")!;
+  const look = serviceOutlook(ledger, "power");
+  const [pick, setPick] = useState<PowerKind>(plant.staged > 0 ? energy.stagedKind : "oil");
+  const used = look.capacity > 0 ? look.demand / look.capacity : 1;
+  const nextPct = Math.round(Math.min(look.nextCover, 1.5) * 100);
+  const cola = ledger.priceIndex / 100;
+  const type = POWER_TYPES[pick];
+  const unlocked = kindUnlocked(energy, pick);
+  const room = stageRoom(energy, pick);
+  const fuel = fuelBill(energy);
+  const share = oilShare(energy);
+  const retiring = energy.retire > 0;
+  const target = retireTarget(energy);
+  const mix = POWER_KINDS.map((kind) => {
+    const row = energy.fleet[kind];
+    return { kind, crew: row.crew, auto: row.auto, total: row.crew + row.auto };
+  });
+  const stagedHere = plant.staged > 0 && energy.stagedKind === pick;
+  return (
+    <article className="rounded-xl border border-border bg-card px-4 py-4" data-testid="power-card">
+      <div className="flex items-start gap-3">
+        <Zap className="mt-1 size-6 shrink-0 text-gold" strokeWidth={1.75} aria-hidden="true" />
+        <div className="min-w-0 flex-1">
+          <h3 className="font-sans text-lg font-semibold">Power</h3>
+          <p className="text-sm text-muted-foreground">
+            A shortfall cuts shifts. The city opens on imported oil. Research unlocks solar, batteries, tidal, and bigger plants.
+          </p>
+          <p className="mt-3 text-base tabular-nums">Uses {formatService(look.demand, def.unit)} this year</p>
+          <p className="text-sm text-muted-foreground tabular-nums">
+            {Math.round(used * 100)}% of {formatService(look.capacity, def.unit)} built
+          </p>
+          <p className={`mt-2 text-base font-semibold tabular-nums ${nextPct < 100 ? "text-warn" : "text-foreground"}`}>
+            Next year {formatService(look.nextDemand, def.unit)} · {nextPct}% covered
+          </p>
+          <p className="mt-2 text-sm tabular-nums" data-testid="power-mix">
+            {mix
+              .filter((row) => row.total > 0 || row.kind === "oil")
+              .map((row) => (
+                <span key={row.kind} className={`mr-3 inline-block ${KIND_TONE[row.kind]}`}>
+                  {POWER_TYPES[row.kind].name} ×{row.total}
+                  {row.auto > 0 ? ` (${row.auto} automated)` : ""}
+                </span>
+              ))}
+          </p>
+          <p className="text-sm text-subtle tabular-nums">
+            {plantJobs("power", plant, energy)} government jobs · {formatMarks(serviceBill(ledger.works, energy).power * cola)} a year
+            {fuel > 0 ? `, ${formatMarks(fuel * cola)} of it imported oil` : ""}
+          </p>
+          <p className="text-sm text-subtle tabular-nums" data-testid="oil-price">
+            Oil price {energy.oilPrice.toFixed(2)}× the census · oil makes {Math.round(share * 100)}% of the power
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-3 gap-2" role="tablist" aria-label="Plant type">
+        {POWER_KINDS.map((kind) => {
+          const open = kindUnlocked(energy, kind);
+          const selected = pick === kind;
+          return (
+            <button
+              key={kind}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              data-testid={`power-kind-${kind}`}
+              className={`min-h-12 rounded-lg px-1 text-sm font-semibold ${selected ? "bg-accent text-accent-foreground" : "border border-border bg-background text-foreground"} ${open ? "" : "opacity-60"}`}
+              onClick={() => setPick(kind)}
+            >
+              {POWER_TYPES[kind].name.replace(" plant", "").replace(" farm", "").replace(" station", "")}
+              {open ? "" : " · locked"}
+            </button>
+          );
+        })}
+      </div>
+      <p className="mt-2 text-sm text-muted-foreground">{type.detail}</p>
+
+      {!unlocked ? (
+        <button
+          type="button"
+          className="mt-3 min-h-14 w-full rounded-xl border border-border bg-background px-3 text-base font-semibold"
+          onClick={onOpenResearch}
+        >
+          Needs {researchDef(type.needs!).name} research · open Research
+        </button>
+      ) : room <= 0 && !stagedHere ? (
+        <p className="mt-3 text-sm text-warn">The shore has room for {MAX_TIDAL} tidal stations. All are built.</p>
+      ) : (
+        <div className="mt-3 flex flex-col gap-2">
+          {(["crew", "auto"] as const).map((mode) => {
+            const auto = mode === "auto";
+            const active = stagedHere && plant.stagedAuto === auto;
+            const count = active ? plant.staged : 0;
+            const upkeep = plantUpkeep(energy, pick, auto) + plantFuel(energy, pick, auto);
+            const more = active && count < room;
+            return (
+              <button
+                key={mode}
+                type="button"
+                data-testid={`stage-${pick}-${mode}`}
+                className={`flex min-h-16 w-full flex-col items-center justify-center rounded-xl px-3 py-2 text-center ${active ? "bg-accent text-accent-foreground" : "border border-border bg-background text-foreground"}`}
+                onClick={() => onStage(pick, mode)}
+              >
+                <span className="text-base font-semibold">
+                  {active
+                    ? `${count > 1 ? `${count} ${type.plural}` : type.name} staged${auto ? " · automated" : ""} · ${more ? "tap to add one" : "tap to cancel"}`
+                    : `${auto ? "Automated" : "Staffed"} ${type.name.toLowerCase()} · ${Math.round(plantCrew(pick, auto))} jobs`}
+                </span>
+                <span className="text-sm">
+                  {formatMarks(type.buildCost * cola)} to build · {formatMarks(upkeep * cola)} a year · +
+                  {formatService(plantMw(energy, pick, auto), def.unit)}
+                </span>
+              </button>
+            );
+          })}
+          {pick === "tidal" ? (
+            <p className="text-sm text-subtle tabular-nums">
+              {tidalCount(energy)} of {MAX_TIDAL} shore sites used.
+            </p>
+          ) : null}
+        </div>
+      )}
+
+      {oilCount(energy) > 0 ? (
+        <button
+          type="button"
+          data-testid="retire-oil"
+          className={`mt-3 flex min-h-14 w-full flex-col items-center justify-center rounded-xl px-3 py-2 text-center ${retiring ? "bg-coral/80 text-background" : "border border-border bg-background text-foreground"}`}
+          onClick={onRetire}
+        >
+          <span className="text-base font-semibold">
+            {retiring ? "Oil plant closes at year end · tap to keep it" : "Close an oil plant"}
+          </span>
+          {!retiring && target ? (
+            <span className="text-sm">
+              −{formatService(plantMw(energy, "oil", target.auto), def.unit)} · saves{" "}
+              {formatMarks((plantUpkeep(energy, "oil", target.auto) + plantFuel(energy, "oil", target.auto)) * cola)} a year ·{" "}
+              {Math.round(plantCrew("oil", target.auto))} jobs lost
+            </span>
+          ) : null}
+        </button>
+      ) : null}
+    </article>
+  );
+}
+
+function ResearchList({
+  ledger,
+  onPick,
+  onOpenCity,
+}: {
+  ledger: Ledger;
+  onPick: (id: ResearchId | null) => void;
+  onOpenCity: () => void;
+}) {
+  const energy = ledger.energy;
+  const cola = ledger.priceIndex / 100;
+  const fuel = fuelBill(energy);
+  const share = oilShare(energy);
+  const upkeep = powerUpkeep(energy);
+  return (
+    <section className="flex flex-col gap-3" aria-label="Energy research" data-testid="research-panel">
+      <article className="rounded-xl border border-border bg-card px-4 py-4">
+        <h2 className="font-sans text-lg font-semibold">Energy research</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Fund one project at a time. It is paid when the year closes and takes a few years. Finished research unlocks new
+          plants or upgrades every plant you already have.
+        </p>
+        <p className="mt-3 text-base tabular-nums">
+          Oil price {energy.oilPrice.toFixed(2)}× the census · oil makes {Math.round(share * 100)}% of the power
+        </p>
+        <p className="text-sm text-subtle tabular-nums">
+          Power costs {formatMarks((upkeep + fuel) * cola)} a year
+          {fuel > 0 ? `, ${formatMarks(fuel * cola)} of it imported oil` : ""}.
+        </p>
+        {energy.active ? (
+          <p className="mt-2 text-sm font-semibold text-accent" data-testid="research-active">
+            Funding {researchDef(energy.active).name}: {energy.research[energy.active]} of {researchDef(energy.active).years} years done.
+          </p>
+        ) : (
+          <p className="mt-2 text-sm text-subtle">Nothing is being researched.</p>
+        )}
+      </article>
+      {RESEARCH.map((item) => {
+        const status = researchStatus(energy, item.id);
+        const done = energy.research[item.id] ?? 0;
+        const tone =
+          status === "done"
+            ? "text-ok"
+            : status === "active"
+              ? "text-accent"
+              : status === "open"
+                ? "text-foreground"
+                : "text-subtle";
+        return (
+          <article
+            key={item.id}
+            className={`rounded-xl border px-4 py-4 ${status === "active" ? "border-accent bg-card" : "border-border bg-card"}`}
+            data-testid={`research-${item.id}`}
+            data-status={status}
+          >
+            <div className="flex items-baseline justify-between gap-3">
+              <h3 className="font-sans text-lg font-semibold">{item.name}</h3>
+              <span className={`text-sm font-semibold ${tone}`}>
+                {status === "done"
+                  ? "Done"
+                  : status === "active"
+                    ? `Year ${done + 1} of ${item.years}`
+                    : status === "open"
+                      ? done > 0
+                        ? `${done} of ${item.years} years, paused`
+                        : "Ready"
+                      : "Locked"}
+              </span>
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">{item.unlocks}</p>
+            {status === "done" ? null : (
+              <p className="mt-2 text-sm tabular-nums">
+                {formatMarks(item.cost * cola)} a year · {item.years} years · {formatMarks(item.cost * item.years * cola)} in all
+              </p>
+            )}
+            {item.needs && status === "locked" ? (
+              <p className="text-sm text-subtle">Needs {researchDef(item.needs).name} first.</p>
+            ) : null}
+            <div className="mt-2 flex h-1.5 overflow-hidden rounded-full bg-border" aria-hidden="true">
+              <span className="h-full bg-accent" style={{ width: `${Math.min(1, done / item.years) * 100}%` }} />
+            </div>
+            {status === "open" || status === "active" ? (
+              <button
+                type="button"
+                data-testid={`fund-${item.id}`}
+                className={`mt-3 min-h-12 w-full rounded-xl px-3 text-base font-semibold ${status === "active" ? "border border-border bg-background" : "bg-accent text-accent-foreground"}`}
+                onClick={() => onPick(status === "active" ? null : item.id)}
+              >
+                {status === "active" ? "Stop funding" : energy.active ? "Fund this instead" : "Fund this"}
+              </button>
+            ) : null}
+            {status === "done" && (item.id === "solar" || item.id === "tidal") ? (
+              <button
+                type="button"
+                className="mt-3 min-h-12 w-full rounded-xl border border-border bg-background px-3 text-base font-semibold"
+                onClick={onOpenCity}
+              >
+                Build in City
+              </button>
+            ) : null}
+          </article>
+        );
+      })}
+    </section>
   );
 }
 

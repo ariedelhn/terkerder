@@ -28,7 +28,10 @@ const KIND_FILL: Partial<Record<BuildingKind, string>> = {
   house: "#2f7a4e",
   shop: "#2d5f96",
   dock: "#8a6a42",
-  power: "#c9a227",
+  power: "#c47a2c",
+  solar: "#27457a",
+  battery: "#4f9a5c",
+  tidal: "#169c94",
   water: "#3a8ec0",
   waste: "#a07540",
   data: "#6a6d78",
@@ -100,8 +103,46 @@ function Icon({ tile }: { tile: MapTile }) {
     );
   }
   if (k === "power") {
+    // Oil plant: a smokestack and a fuel tank.
     return (
-      <path d="M5.6 1.8 L3.4 5.6 H5.2 L4.4 8.3 L7.2 4.6 H5.4Z" fill="#1a1404" opacity="0.85" />
+      <g opacity="0.9">
+        <rect x="2.4" y="2.2" width="1.5" height="5.6" rx="0.2" fill="#2a1a0a" />
+        <circle cx="3.15" cy="1.6" r="0.6" fill="#d9d2c4" opacity="0.7" />
+        <rect x="4.6" y="4.2" width="3.2" height="3.6" rx="1" fill="#2a1a0a" />
+        <path d="M6.2 4.9 C6.2 4.9 5.5 5.8 5.5 6.3 A0.7 0.7 0 0 0 6.9 6.3 C6.9 5.8 6.2 4.9 6.2 4.9Z" fill="#f0c14a" />
+      </g>
+    );
+  }
+  if (k === "solar") {
+    return (
+      <g>
+        <rect x="1.9" y="2.6" width="6.2" height="4.8" rx="0.3" fill="#0f2242" stroke="#9cc4ff" strokeWidth="0.35" />
+        <path d="M4 2.6 V7.4 M6 2.6 V7.4 M1.9 5 H8.1" stroke="#9cc4ff" strokeWidth="0.3" />
+        <circle cx="7.6" cy="2" r="0.8" fill="#f0c14a" />
+      </g>
+    );
+  }
+  if (k === "battery") {
+    return (
+      <g>
+        <rect x="2.4" y="3.2" width="4.8" height="3.6" rx="0.4" fill="#eaf6ec" opacity="0.9" />
+        <rect x="7.2" y="4.3" width="0.7" height="1.4" rx="0.2" fill="#eaf6ec" opacity="0.9" />
+        <rect x="2.9" y="3.7" width="2.6" height="2.6" rx="0.2" fill="#2f7a3e" />
+      </g>
+    );
+  }
+  if (k === "tidal") {
+    // Tidal turbine: a hub with three blades over the waves.
+    return (
+      <g>
+        <path d="M1.8 7.6 Q3.4 6.9 5 7.6 Q6.6 8.3 8.2 7.6" stroke="#d8f4f1" strokeWidth="0.45" fill="none" opacity="0.8" />
+        <g fill="#eafaf8" opacity="0.95">
+          <path d="M5 4.4 L4.6 1.6 L5.4 1.6Z" />
+          <path d="M5 4.4 L7.5 5.6 L7.1 6.3Z" />
+          <path d="M5 4.4 L2.9 6.3 L2.5 5.6Z" />
+          <circle cx="5" cy="4.4" r="0.7" />
+        </g>
+      </g>
     );
   }
   if (k === "water") {
@@ -193,7 +234,10 @@ const LEGEND: readonly { color: string; label: string; mark?: "auto" }[] = [
   { color: "#2d5f96", label: "Shops" },
   { color: "#6a6328", label: "Industry" },
   { color: "#6a6d78", label: "Data" },
-  { color: "#c9a227", label: "Power" },
+  { color: "#c47a2c", label: "Oil power" },
+  { color: "#27457a", label: "Solar" },
+  { color: "#4f9a5c", label: "Batteries" },
+  { color: "#169c94", label: "Tidal" },
   { color: "#3a8ec0", label: "Water" },
   { color: "#a07540", label: "Waste" },
   { color: "#3ecfb2", label: "Automated", mark: "auto" },
@@ -202,6 +246,11 @@ const LEGEND: readonly { color: string; label: string; mark?: "auto" }[] = [
 function summaryText(ledger: Ledger, map: ReturnType<typeof buildCityMap>): string {
   const { counts } = map;
   const plants = counts.power + counts.water + counts.waste;
+  const energy = [
+    counts.oil ? `${formatInt(counts.oil)} oil` : "",
+    counts.solar ? `${formatInt(counts.solar)} solar` : "",
+    counts.tidal ? `${formatInt(counts.tidal)} tidal` : "",
+  ].filter(Boolean);
   const parts = [
     `Year ${ledger.year} city map`,
     `${formatInt(ledger.population)} residents`,
@@ -209,6 +258,7 @@ function summaryText(ledger: Ledger, map: ReturnType<typeof buildCityMap>): stri
     `${formatInt(counts.shops)} shops`,
     `${formatInt(plants)} utility plants`,
   ];
+  if (energy.length > 0) parts.push(`Power from ${energy.join(", ")}`);
   if (counts.data > 0) parts.push(`${formatInt(counts.data)} data centers`);
   if (counts.automatedPlants > 0) parts.push(`${formatInt(counts.automatedPlants)} automated`);
   return parts.join(". ");
@@ -300,6 +350,12 @@ export function CityMap({ ledger }: { ledger: Ledger }) {
           {formatInt(map.counts.homes)} homes · {formatInt(map.counts.shops)} shops ·{" "}
           {formatInt(map.counts.power + map.counts.water + map.counts.waste)} plants ·{" "}
           {formatInt(map.counts.data)} data centers
+        </p>
+        <p className="px-0.5 text-sm text-muted-foreground" data-testid="map-energy">
+          Power: {formatInt(map.counts.oil)} oil
+          {map.counts.solar > 0 ? ` · ${formatInt(map.counts.solar)} solar` : ""}
+          {map.counts.batteries > 0 ? ` · ${formatInt(map.counts.batteries)} battery banks` : ""}
+          {map.counts.tidal > 0 ? ` · ${formatInt(map.counts.tidal)} tidal` : ""}
         </p>
         {selected ? (
           <p className="px-0.5 text-base font-semibold" data-testid="map-inspect">
