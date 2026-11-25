@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
-import { formatInt } from "@/lib/sim/format";
+import { formatInt, formatPct } from "@/lib/sim/format";
 import { buildCityMap, type BuildingKind, type MapTile, type Zone } from "@/lib/sim/city-map";
-import type { Ledger } from "@/lib/sim/engine";
+import { asPolice, waveDamage, type Ledger } from "@/lib/sim/engine";
 
 const CELL = 10;
 const GAP = 0.45;
@@ -261,6 +261,7 @@ const LEGEND: readonly { color: string; label: string; mark?: "auto" }[] = [
   { color: "#3a8ec0", label: "Water" },
   { color: "#a07540", label: "Waste" },
   { color: "#3ecfb2", label: "Automated", mark: "auto" },
+  { color: "#e5484d", label: "Protest" },
 ];
 
 function summaryText(ledger: Ledger, map: ReturnType<typeof buildCityMap>): string {
@@ -282,7 +283,52 @@ function summaryText(ledger: Ledger, map: ReturnType<typeof buildCityMap>): stri
   if (energy.length > 0) parts.push(`Power from ${energy.join(", ")}`);
   if (counts.data > 0) parts.push(`${formatInt(counts.data)} data centers`);
   if (counts.automatedPlants > 0) parts.push(`${formatInt(counts.automatedPlants)} automated`);
+  if (counts.protests > 0) parts.push(`Protests on ${formatInt(counts.protests)} squares`);
   return parts.join(". ");
+}
+
+const POLICE_WORD = { low: "Thin police force", normal: "Normal police", strong: "Strong police" } as const;
+
+/** What the current protest wave is doing and how long it lasts. Red tiles on the map show where. */
+export function UnrestBanner({ ledger }: { ledger: Ledger }) {
+  const wave = ledger.unrest?.wave;
+  if (!wave || wave.yearsLeft <= 0) {
+    const cooldown = ledger.unrest?.cooldown ?? 0;
+    if (cooldown <= 0 || !ledger.hasClosedYear) return null;
+    return (
+      <p className="rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground" data-testid="unrest-calm">
+        The streets are calm. People are waiting to see what changes; no new protest wave can start for{" "}
+        {cooldown === 1 ? "1 more year" : `${cooldown} more years`}.
+      </p>
+    );
+  }
+  const police = asPolice(ledger.policies?.police);
+  const fresh = wave.started === ledger.year;
+  const now = waveDamage(wave, police);
+  const left = police === "strong" ? 1 : wave.yearsLeft;
+  const years = left === 1 ? "1 year" : `${left} years`;
+  return (
+    <div
+      role="status"
+      className="rounded-lg border border-danger/60 bg-danger/15 px-3 py-2 text-sm"
+      data-testid="unrest-banner"
+    >
+      <p className="font-semibold text-danger">
+        {fresh ? `Protests broke out · stability fell below ${wave.line}` : `Protests go on · from the fall below ${wave.line}`}
+      </p>
+      <p className="mt-0.5 text-foreground">
+        Road blockades cut shop, office, freight and building business about {formatPct(now.share)} for {years}.
+        Looters shut about {formatPct(now.closed)} of shops; they reopen as the protests end.
+      </p>
+      <p className="mt-0.5 text-muted-foreground">
+        {POLICE_WORD[police]}.{" "}
+        {police === "strong"
+          ? "Damage is lower and the roads clear sooner."
+          : "Switch to strong police to cut the damage and clear the roads sooner, at a cost."}{" "}
+        No new wave can start until this one has run its course.
+      </p>
+    </div>
+  );
 }
 
 export function CityMap({ ledger }: { ledger: Ledger }) {
@@ -303,6 +349,7 @@ export function CityMap({ ledger }: { ledger: Ledger }) {
         A dock town on the east shore. Houses fill as people arrive. Plants and data centers appear
         as you build and automate.
       </p>
+      <UnrestBanner ledger={ledger} />
       <div className="overflow-hidden rounded-xl border border-border bg-[#10141c]/70 p-2">
         <svg
           viewBox={`0 0 ${size} ${size}`}
@@ -329,6 +376,7 @@ export function CityMap({ ledger }: { ledger: Ledger }) {
                 data-zone={tile.zone}
                 data-terrain={tile.terrain}
                 data-automated={tile.automated ? "true" : "false"}
+                data-protest={tile.protest ? "true" : undefined}
                 onClick={() => onSelect(tile)}
                 className="cursor-pointer"
               >
@@ -345,6 +393,21 @@ export function CityMap({ ledger }: { ledger: Ledger }) {
                   strokeDasharray={tile.staged ? "0.9 0.7" : undefined}
                 />
                 <Icon tile={tile} />
+                {tile.protest ? (
+                  <rect
+                    x={GAP}
+                    y={GAP}
+                    width={CELL - GAP * 2}
+                    height={CELL - GAP * 2}
+                    rx={1.15}
+                    fill="#e5484d"
+                    fillOpacity={0.5}
+                    stroke="#ff6b6b"
+                    strokeWidth={0.6}
+                    className="motion-safe:animate-pulse"
+                    pointerEvents="none"
+                  />
+                ) : null}
                 {tile.automated ? (
                   <circle cx={CELL - 1.8} cy={1.8} r={0.85} fill="#3ecfb2" />
                 ) : null}

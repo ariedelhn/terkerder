@@ -9,6 +9,7 @@ import {
   toggleTech,
   TECHS,
   jobsGap,
+  housingPressure,
   type Ledger,
   type Policies,
 } from "../../src/lib/sim/engine.ts";
@@ -78,6 +79,24 @@ const plans: Plan[] = [
     },
   },
   {
+    name: "careful+react",
+    build: true,
+    each: (s) => {
+      let st = s;
+      if (s.year === 3) st = setPol(st, { retrain: true, publicHiring: "some", aiLevy: true });
+      if (s.unemployment > 0.085 && !st.policies.stipend) st = setPol(st, { stipend: true });
+      if (s.unemployment < 0.06 && st.policies.stipend) st = setPol(st, { stipend: false });
+      // Strong police only while a wave is on; normal once it ends.
+      st = setPol(st, { police: s.unrest.wave != null ? "strong" : "normal" });
+      // When the books keep sinking into debt, drop the optional programs before the protests start.
+      const sinking = s.debt > 150_000_000 && s.taxRevenue < s.spending;
+      if (sinking) st = setPol(st, { publicHiring: "off", retrain: false });
+      else if (s.debt === 0 && s.treasury > 300_000_000 && s.year > 3) st = setPol(st, { publicHiring: "some", retrain: true });
+      st = fiscal(st);
+      return keepUp(st, false);
+    },
+  },
+  {
     name: "moderate",
     build: true,
     each: (s) => {
@@ -130,6 +149,21 @@ const plans: Plan[] = [
       return keepUp(st, true);
     },
   },
+  {
+    // Alan's current game: staffed plants, little automation, open borders, and reacting to trouble.
+    name: "open-borders",
+    build: true,
+    each: (s) => {
+      let st = s;
+      if (s.year === 3) st = setPol(st, { gates: "open", retrain: true });
+      if (s.unemployment > 0.085 && !st.policies.stipend) st = setPol(st, { stipend: true });
+      if (s.unemployment < 0.06 && st.policies.stipend) st = setPol(st, { stipend: false });
+      st = setPol(st, { police: s.unrest.wave != null ? "strong" : "normal" });
+      st = fiscal(st);
+      return keepUp(st, false);
+    },
+  },
+  { name: "open-borders-nothing", build: true, each: (s) => keepUp(s.year === 3 ? setPol(s, { gates: "open" }) : s, false) },
   { name: "firms-nothing", build: false, each: (s) => s },
   { name: "firms-nothing+build", build: true, each: (s) => keepUp(s, false) },
 ];
@@ -159,7 +193,9 @@ for (const plan of plans) {
   const maxInfl = Math.max(...rows.map((r) => r.inflation));
   const avgInfl = rows.reduce((a, r) => a + r.inflation, 0) / rows.length;
   const maxU = Math.max(...rows.map((r) => r.unemployment));
+  const waves = rows.filter((r) => r.unrest.wave && r.unrest.wave.started === r.year).length;
+  const crowd = Math.max(...rows.map((r) => housingPressure(r)));
   console.log(
-    `${plan.name.padEnd(20)} stab avg ${avg.toFixed(1)} min ${Math.min(...stab)} end ${last.stability} | u end ${(last.unemployment * 100).toFixed(1)}% max ${(maxU * 100).toFixed(1)}% youth end ${(last.jobs.youthUnemployment * 100).toFixed(1)}% max ${(Math.max(...youth) * 100).toFixed(1)}% | gap ${gapNow?.gap ?? "-"} (${(((gapNow?.gap ?? 0) / last.laborForce) * 100).toFixed(1)}% LF) | rsv ${(last.treasury / 1e6).toFixed(0)}m debt ${(last.debt / 1e6).toFixed(0)}m | infl avg ${(avgInfl * 100).toFixed(1)}% max ${(maxInfl * 100).toFixed(1)}% cpi ${Math.round(last.priceIndex)} | pop ${last.population}`,
+    `${plan.name.padEnd(20)} stab avg ${avg.toFixed(1)} min ${Math.min(...stab)} end ${last.stability} | u end ${(last.unemployment * 100).toFixed(1)}% max ${(maxU * 100).toFixed(1)}% youth end ${(last.jobs.youthUnemployment * 100).toFixed(1)}% max ${(Math.max(...youth) * 100).toFixed(1)}% | gap ${gapNow?.gap ?? "-"} (${(((gapNow?.gap ?? 0) / last.laborForce) * 100).toFixed(1)}% LF) | rsv ${(last.treasury / 1e6).toFixed(0)}m debt ${(last.debt / 1e6).toFixed(0)}m | infl avg ${(avgInfl * 100).toFixed(1)}% max ${(maxInfl * 100).toFixed(1)}% cpi ${Math.round(last.priceIndex)} | pop ${last.population} | waves ${waves} | homes max ${(crowd * 100).toFixed(0)}%`,
   );
 }

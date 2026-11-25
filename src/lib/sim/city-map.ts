@@ -8,6 +8,7 @@ import {
 import {
   asPlant,
   openingWorks,
+  waveDamage,
   type Ledger,
   type ServiceId,
   type ServicePlant,
@@ -54,6 +55,8 @@ export type MapTile = {
   density: number;
   automated: boolean;
   staged: boolean;
+  /** Protesters or blockades on this square during a protest wave. */
+  protest: boolean;
   label: string;
 };
 
@@ -67,6 +70,10 @@ export type CityMapModel = {
     shops: number;
     offices: number;
     emptyOffices: number;
+    /** Squares with protesters or blockades. */
+    protests: number;
+    /** Shops shut after looting. */
+    looted: number;
     docks: number;
     power: number;
     water: number;
@@ -435,6 +442,7 @@ function emptyTile(x: number, y: number): MapTile {
     density: 0,
     automated: false,
     staged: false,
+    protest: false,
     label,
   };
 }
@@ -561,6 +569,37 @@ export function buildCityMap(ledger: Ledger): CityMapModel {
     }
   }
 
+  // Protest waves: blockades in the shop district and on industrial roads, looted shops shut for now.
+  const wave = ledger.unrest?.wave ?? null;
+  const hurt = waveDamage(wave, ledger.policies?.police ?? "normal");
+  let protests = 0;
+  let looted = 0;
+  if (wave && wave.yearsLeft > 0) {
+    const shopTiles = tiles.filter((tile) => tile.kind === "shop" || tile.kind === "office");
+    const shut = Math.max(1, Math.round(shopsWanted * hurt.closed * 3));
+    for (let i = 0; i < Math.min(shut, shopsWanted); i += 1) {
+      const [x, y] = SHOP_LOTS[i]!;
+      place(x, y, { density: 0, label: "Shops · looted, closed for now" });
+      looted += 1;
+    }
+    const marched = Math.max(3, Math.round(shopTiles.length * Math.min(0.7, hurt.share * 4 + 0.1)));
+    for (let i = 0; i < Math.min(marched, shopTiles.length); i += 1) {
+      const tile = shopTiles[i]!;
+      tile.protest = true;
+      tile.label = `${tile.label} · protest blockade`;
+      protests += 1;
+    }
+    const roads = tiles.filter((tile) => tile.zone === "industrial" && tile.kind === "empty" && tile.terrain === "land");
+    const blocked = Math.round(roads.length * Math.min(0.4, hurt.share * 2));
+    for (let i = 0; i < blocked; i += 1) {
+      // Spread blockades along the industrial district, not in one clump.
+      const tile = roads[Math.floor((i * roads.length) / Math.max(1, blocked))]!;
+      tile.protest = true;
+      tile.label = "Road blockade";
+      protests += 1;
+    }
+  }
+
   const dataWanted = dataCenterCount(ledger);
   for (let i = 0; i < dataWanted; i += 1) {
     const [x, y] = DATA_SLOTS[i]!;
@@ -577,6 +616,8 @@ export function buildCityMap(ledger: Ledger): CityMapModel {
       shops: shopsWanted,
       offices: towers.busy,
       emptyOffices: towers.total - towers.busy,
+      protests,
+      looted,
       docks: DOCKS.length,
       power: works.power.plants + works.power.auto,
       water: works.water.plants + works.water.auto,

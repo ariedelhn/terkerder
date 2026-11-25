@@ -36,7 +36,8 @@ export type { EnergyState, PowerKind, ResearchId } from "./energy.ts";
 
 export const BASE_POP = 72_000;
 export const PARTICIPATION = 0.6;
-export const STANDING_PER_CAPITA = 5_200;
+/** Standing services per resident, not counting police (330 at the normal level). */
+export const STANDING_PER_CAPITA = 4_870;
 export const STIPEND_PER = 11_000;
 export const DIVIDEND_PER = 1_200;
 export const WORKS_AT_BASE = 26_000_000;
@@ -109,6 +110,79 @@ export function asPublicHiring(value: unknown): PublicHiring {
   return value === "some" || value === "big" ? value : "off";
 }
 
+export type Police = "low" | "normal" | "strong";
+
+export const POLICE_IDS: readonly Police[] = ["low", "normal", "strong"];
+
+export function asPolice(value: unknown): Police {
+  return value === "low" || value === "strong" ? value : "normal";
+}
+
+/**
+ * Police budget per resident (census pay), and how each level changes a protest wave.
+ * Normal police are already part of the old standing-services cost, so a normal city pays the same as before.
+ */
+export const POLICE: Record<Police, { perCapita: number; damage: number; shorten: number; crime: number; stability: number }> = {
+  low: { perCapita: 170, damage: 1.3, shorten: -1, crime: 1.2, stability: 0 },
+  normal: { perCapita: 330, damage: 1, shorten: 0, crime: 1, stability: 0 },
+  strong: { perCapita: 660, damage: 0.6, shorten: 1, crime: 0.85, stability: -0.4 },
+};
+
+/** Protest waves start each time stability falls past another of these lines. */
+export const UNREST_START = 70;
+export const UNREST_STEP = 5;
+export const UNREST_LINES: readonly number[] = Array.from({ length: UNREST_START / UNREST_STEP }, (_, i) => UNREST_START - i * UNREST_STEP);
+/** Years after a wave starts when no new wave can start. */
+export const UNREST_COOLDOWN = 2;
+/** One-time stability cost when a wave breaks out. */
+export const UNREST_HIT = 2;
+/** Shops and offices take the road blockades; so do freight and building sites. */
+export const BLOCKADE_SECTORS: ReadonlySet<SectorId> = new Set<SectorId>(["services", "office", "food", "transport", "housing"]);
+
+export type UnrestWave = {
+  /** Year the wave broke out. Its damage counts in the years after. */
+  started: number;
+  /** Years of damage still to come. */
+  yearsLeft: number;
+  length: number;
+  /** Share of shop, office, freight, and building output lost to blockades. */
+  cut: number;
+  /** Share of shop jobs closed by looting at the start. Shops reopen as the wave ends. */
+  closed: number;
+  /** The stability line that set it off. */
+  line: number;
+};
+
+export type UnrestState = {
+  /** Lines already crossed on the way down. A line re-arms once stability climbs back above it. */
+  fired: number[];
+  /** Years left before a new wave can start. */
+  cooldown: number;
+  wave: UnrestWave | null;
+  /** Lines crossed during a cooldown: no wave, so the player has time to react. */
+  calmed: number[];
+};
+
+export type MigrationState = {
+  /** Recent arrivals still looking for work and a home. They count as job seekers but barely as customers yet. */
+  newcomers: number;
+  /** People the city's homes can hold. */
+  housing: number;
+  /** How far the open- or tight-gates effect on hiring has built up, from -1 (tight) to 1 (open). */
+  gateRamp: number;
+};
+
+/** Share of recent arrivals who settle into work and a home each year. */
+export const SETTLE_RATE = 0.5;
+/** Unsettled newcomers spend and create jobs at 40% of a settled resident. */
+export const NEWCOMER_DEMAND_GAP = 0.6;
+/** How fast the gates' hiring effect builds or fades per year. */
+export const GATE_RAMP_STEP = 0.5;
+/** Births minus deaths: growth above this is people arriving. */
+const NATURAL_GROWTH = 0.0035;
+/** Homes for this share more people than live in the city at the census. */
+const OPEN_HOUSING_SLACK = 1.025;
+
 export type Policies = {
   tax: TaxBand;
   gates: Gates;
@@ -123,6 +197,8 @@ export type Policies = {
   publicHiring: PublicHiring;
   /** A levy on AI that firms adopt on their own. Halves their pace. Missing on older saves. */
   aiLevy: boolean;
+  /** Police budget. Strong police shorten protest waves but cost money and a little goodwill. Missing on older saves. */
+  police: Police;
 };
 
 export type TechState = { on: boolean; activeYears: number };
@@ -159,6 +235,8 @@ export type SpendParts = {
   research: number;
   /** Wages of the extra public jobs hired to soak up displaced workers. Missing on older saves. */
   publicJobs: number;
+  /** Police budget. Older saves had it inside standing services. */
+  police: number;
 };
 
 export type ServiceId = "power" | "water" | "waste";
@@ -470,9 +548,11 @@ export function willProtest(
   stability: number,
   needsMet = false,
 ): boolean {
-  if (covers.waste < 0.9 || covers.power < 0.88 || covers.water < 0.9) return true;
-  if (needsMet) return false;
-  return stability < 42 && unemployment > 0.16;
+  // Low stability now brings protest waves (see nextUnrest); this is the overflow kind.
+  void unemployment;
+  void stability;
+  void needsMet;
+  return covers.waste < 0.9 || covers.power < 0.88 || covers.water < 0.9;
 }
 
 export type YearMark = {
@@ -778,6 +858,10 @@ export type Ledger = {
   ai: AiState;
   /** This year's AI and labor detail: youth jobless, frozen hiring, public jobs, downshift. */
   jobs: JobsView;
+  /** Protest waves: lines crossed, the cooldown, and any wave still hurting business. */
+  unrest: UnrestState;
+  /** Newcomers still settling in, and how many people the city's homes hold. */
+  migration: MigrationState;
   /** 100 at the opening census. Cumulative price level. */
   priceIndex: number;
   /** Yearly inflation rate, e.g. 0.02 for 2%. */
@@ -1022,6 +1106,7 @@ const NEUTRAL: Policies = {
   ownership: "firms",
   publicHiring: "off",
   aiLevy: false,
+  police: "normal",
 };
 
 const OPEN_EMPLOYED = SECTORS.reduce((sum, sector) => sum + sector.baseSlots, 0);
@@ -1046,6 +1131,7 @@ function emptySpend(): SpendParts {
     principal: 0,
     research: 0,
     publicJobs: 0,
+    police: 0,
   };
 }
 
@@ -1199,6 +1285,7 @@ export function programCosts(pop: number, unemployed: number): SpendParts {
     principal: 0,
     research: 0,
     publicJobs: 0,
+    police: Math.round(pop * POLICE.normal.perCapita),
   };
 }
 
@@ -1372,6 +1459,17 @@ function stagedMachines(state: Pick<Ledger, "techs">): number {
   return extra;
 }
 
+type DemandExtra = {
+  /** Built-up gate effect, -1 to 1. Defaults to the full effect of the current gates. */
+  gateRamp?: number;
+  /** Residents who create jobs this year: settled people plus a part of the newcomers. */
+  demandPop?: number;
+  /** Protest blockades: share of output lost by sector. */
+  cut?: Partial<Record<SectorId, number>>;
+  /** Share of shop jobs closed by looting. */
+  closed?: number;
+};
+
 type Demand = {
   slots: number[];
   /** Public jobs added to each sector by the public hiring lever. */
@@ -1391,15 +1489,19 @@ function desiredSlots(
   works?: Works,
   energy?: EnergyState | null,
   adoption?: Record<SectorId, number> | null,
+  extra?: DemandExtra,
 ): Demand {
   const forces = yearForces(year);
+  const gateRamp = extra?.gateRamp ?? (policies.gates === "open" ? 1 : policies.gates === "tight" ? -1 : 0);
+  // Newcomers still settling in spend less, so the jobs they bring lag them.
+  const demandPop = Math.max(1, extra?.demandPop ?? pop);
   const cheap = clamp(1 - priceRatio(techs, adoption), 0, 0.45);
   const absorb = absorption(techs, policies);
   let displacedJobs = 0;
   let machineTotal = 0;
   let officeDisplaced = 0;
   const ownMachines = SECTORS.map((sector) => {
-    const scale = peopleScale(pop, JOB_ELASTICITY[sector.id]);
+    const scale = peopleScale(demandPop, JOB_ELASTICITY[sector.id]);
     const gone = displacedShare(sector, techs, adoption);
     const machines = sector.baseSlots * scale * gone;
     displacedJobs += sector.baseSlots * scale * gone;
@@ -1413,18 +1515,13 @@ function desiredSlots(
   const sponge = SECTORS.map((sector) => hires * (PUBLIC_SPLIT[sector.id] ?? 0));
   const slots = SECTORS.map((sector, index) => {
     const gone = displacedShare(sector, techs, adoption);
-    let slots = sector.baseSlots * peopleScale(pop, JOB_ELASTICITY[sector.id]) * forces.slot[sector.id];
+    let slots = sector.baseSlots * peopleScale(demandPop, JOB_ELASTICITY[sector.id]) * forces.slot[sector.id];
     slots *= 1 - gone;
     if (policies.tax === "high") slots *= 0.98;
     if (policies.tax === "low") slots *= 1.015;
-    if (sector.id === "transport") {
-      if (policies.gates === "open") slots *= 1.08;
-      if (policies.gates === "tight") slots *= 0.95;
-    } else if (policies.gates === "open") {
-      slots *= 1.03;
-    } else if (policies.gates === "tight") {
-      slots *= 0.985;
-    }
+    // Open gates bring traders and new businesses, but that takes a year or two to build up.
+    if (sector.id === "transport") slots *= 1 + (gateRamp > 0 ? 0.08 : 0.05) * gateRamp;
+    else slots *= 1 + (gateRamp > 0 ? 0.03 : 0.015) * gateRamp;
     if (
       policies.wageFloor &&
       (sector.id === "transport" || sector.id === "services" || sector.id === "government")
@@ -1455,6 +1552,10 @@ function desiredSlots(
         slots += plantJobs("waste", asPlant(works.waste));
       }
     }
+    // Blockades cost some jobs outright; looted shops stay shut for a while.
+    const cut = extra?.cut?.[sector.id] ?? 0;
+    slots *= 1 - cut * 0.4;
+    if (sector.id === "services") slots *= 1 - (extra?.closed ?? 0);
     return Math.max(0, slots * (climate ?? 1));
   });
   return { slots, sponge, displaced: displacedJobs, officeDisplaced, downshift, absorb };
@@ -1511,7 +1612,12 @@ function project(args: {
   adoption?: Record<SectorId, number> | null;
   prevAdoption?: Record<SectorId, number> | null;
   prevYouthGap?: number;
+  /** Built-up gate effect, newcomers' lag, and protest damage. */
+  extra?: DemandExtra;
 }): Project {
+  const gateRamp =
+    args.extra?.gateRamp ?? (args.policies.gates === "open" ? 1 : args.policies.gates === "tight" ? -1 : 0);
+  const cutOf = (id: SectorId) => args.extra?.cut?.[id] ?? 0;
   const forces = yearForces(args.year);
   let participation = PARTICIPATION + forces.participation;
   const priorU = args.prevUnemployment;
@@ -1522,8 +1628,7 @@ function project(args: {
     else if (priorU > 0.1) participation -= 0.006;
   }
   if (args.policies.stipend && (priorU ?? 0) > 0.08) participation += 0.004;
-  if (args.policies.gates === "open") participation += 0.004;
-  if (args.policies.gates === "tight") participation -= 0.006;
+  participation += gateRamp > 0 ? 0.004 * gateRamp : 0.006 * gateRamp;
   const shock = priceRatio(args.techs, args.adoption);
   if (shock < 0.97) participation -= (0.97 - shock) * 0.03;
   if (args.policies.retrain && shock < 0.98) participation += 0.006;
@@ -1540,6 +1645,7 @@ function project(args: {
     args.works,
     args.energy,
     args.adoption,
+    args.extra,
   );
   const wantedRaw = demand.slots;
   const wanted = Math.round(sumOf(wantedRaw));
@@ -1598,7 +1704,10 @@ function project(args: {
   const publicJobs = Math.round(sumOf(spongeFilled));
   const automatons = sectors.reduce((sum, sector) => sum + sector.automatons, 0);
   const outputUnits = sectors.reduce(
-    (sum, sector, index) => sum + sector.employed + sector.automatons * machineOutput(SECTORS[index]!, args.techs, args.adoption),
+    (sum, sector, index) =>
+      sum +
+      (sector.employed + sector.automatons * machineOutput(SECTORS[index]!, args.techs, args.adoption)) *
+        (1 - cutOf(sector.id)),
     0,
   );
   const prevPrice = args.priceLevel ?? PRICE_CENSUS;
@@ -1620,8 +1729,8 @@ function project(args: {
       const snap = wageSectors[index]!;
       let activity = 1;
       if (sector.id === "transport") activity *= forces.trade;
-      if (sector.id === "transport" && args.policies.gates === "open") activity *= 1.05;
-      if (sector.id === "transport" && args.policies.gates === "tight") activity *= 0.97;
+      if (sector.id === "transport") activity *= 1 + (gateRamp > 0 ? 0.05 : 0.03) * gateRamp;
+      activity *= 1 - cutOf(sector.id);
       if (sector.id === "housing") activity *= forces.slot.housing;
       humanBase += snap.employed * snap.wage * activity;
     }
@@ -1650,6 +1759,8 @@ function project(args: {
       publicJobs: Math.round(
         wageSectors.reduce((sum, sector, index) => sum + (spongeFilled[index] ?? 0) * sector.wage, 0) * PUBLIC_JOB_OVERHEAD,
       ),
+      // Police are public pay too.
+      police: Math.round(args.pop * POLICE[asPolice(args.policies.police)].perCapita * Math.max(wageScale, 0.2)),
     };
     const spending = spendTotal(spend);
     return { avgWage, profit, taxRevenue, spend, spending };
@@ -1838,6 +1949,8 @@ export function openingState(charter: CharterId = "census"): Ledger {
     energy: openingEnergy,
     ai: freshAi(),
     jobs: census.jobs,
+    unrest: freshUnrest(),
+    migration: openingMigration(BASE_POP),
     priceIndex: census.priceIndex,
     inflation: INFLATION_TARGET,
     wageScale: 1,
@@ -1873,12 +1986,15 @@ function nextPopulation(state: Ledger): number {
   growth += (state.stability - OPEN_STABILITY) * 0.00009;
   growth -= Math.max(0, u - 0.08) * 0.05;
   if (u < 0.07) growth += 0.002;
-  if (state.policies.gates === "open") growth += 0.008;
+  // Open gates draw people looking for work; word of a jobless city travels and the flow dries up.
+  if (state.policies.gates === "open") growth += 0.008 * clamp(1 - (u - 0.08) / 0.1, 0, 1);
   if (state.policies.gates === "tight") growth -= 0.005;
   if (state.realWage > 43_000) growth += 0.001;
   growth += yearForces(state.year + 1).migration;
   const water = state.covers?.water ?? 1;
   if (water < 1) growth -= (1 - water) * 0.015;
+  // Crowded homes keep newcomers away and push some residents out.
+  growth -= Math.max(0, housingPressure(state) - 1) * 0.1;
   growth = clamp(growth, -0.02, 0.022);
   return clamp(Math.round(state.population * (1 + growth)), 12_000, 5_000_000);
 }
@@ -1964,12 +2080,12 @@ export function snapshot(state: Ledger): YearMark {
 
 type TrailInput = Omit<
   Ledger,
-  "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale" | "energy" | "ai" | "jobs"
+  "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale" | "energy" | "ai" | "jobs" | "unrest" | "migration"
 > &
   Partial<
     Pick<
       Ledger,
-      "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale" | "energy" | "ai" | "jobs"
+      "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale" | "energy" | "ai" | "jobs" | "unrest" | "migration"
     >
   >;
 
@@ -1980,7 +2096,178 @@ export function cleanPolicies(raw: Policies): Policies {
     ownership: asOwnership(raw.ownership),
     publicHiring: asPublicHiring(raw.publicHiring),
     aiLevy: raw.aiLevy === true,
+    police: asPolice(raw.police),
   };
+}
+
+export function freshUnrest(): UnrestState {
+  return { fired: [], cooldown: 0, wave: null, calmed: [] };
+}
+
+function finiteOr(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+/** Unrest from any save: older cities start calm, with every line armed below their current stability. */
+export function asUnrest(raw: unknown, stability: number): UnrestState {
+  const lines = (value: unknown) =>
+    Array.isArray(value) ? UNREST_LINES.filter((line) => value.includes(line)) : [];
+  if (!raw || typeof raw !== "object") {
+    // An old save already below a line should not erupt for lines it crossed long ago.
+    return { ...freshUnrest(), fired: UNREST_LINES.filter((line) => stability < line) };
+  }
+  const value = raw as Partial<UnrestState>;
+  const w = value.wave as Partial<UnrestWave> | null | undefined;
+  const wave: UnrestWave | null =
+    w && typeof w === "object" && finiteOr(w.yearsLeft, 0) > 0
+      ? {
+          started: finiteOr(w.started, 0),
+          yearsLeft: clamp(Math.round(finiteOr(w.yearsLeft, 1)), 1, 3),
+          length: clamp(Math.round(finiteOr(w.length, 1)), 1, 3),
+          cut: clamp(finiteOr(w.cut, 0.05), 0, 0.25),
+          closed: clamp(finiteOr(w.closed, 0), 0, 0.12),
+          line: finiteOr(w.line, UNREST_START),
+        }
+      : null;
+  return {
+    fired: lines(value.fired),
+    cooldown: clamp(Math.round(finiteOr(value.cooldown, 0)), 0, UNREST_COOLDOWN),
+    wave,
+    calmed: lines(value.calmed),
+  };
+}
+
+export function openingMigration(pop: number): MigrationState {
+  return { newcomers: 0, housing: Math.round(pop * OPEN_HOUSING_SLACK), gateRamp: 0 };
+}
+
+export function asMigration(raw: unknown, pop: number, gates: Gates): MigrationState {
+  if (!raw || typeof raw !== "object") {
+    // An old save gets the gate effect at full strength, as it had before, and homes for everyone.
+    return { ...openingMigration(pop), gateRamp: gates === "open" ? 1 : gates === "tight" ? -1 : 0 };
+  }
+  const value = raw as Partial<MigrationState>;
+  return {
+    newcomers: Math.max(0, Math.round(finiteOr(value.newcomers, 0))),
+    housing: Math.max(1, Math.round(finiteOr(value.housing, pop * OPEN_HOUSING_SLACK))),
+    gateRamp: clamp(finiteOr(value.gateRamp, 0), -1, 1),
+  };
+}
+
+/** People per home slot. Above 1 the city is crowded: rents climb and tempers fray. */
+export function housingPressure(state: Pick<Ledger, "population"> & { migration?: MigrationState }): number {
+  const housing = state.migration?.housing ?? state.population * OPEN_HOUSING_SLACK;
+  return state.population / Math.max(1, housing);
+}
+
+/** Yearly stability cost of crowding. */
+export function crowdingPenalty(pressure: number): number {
+  return Math.min(3, Math.max(0, pressure - 1) * 50);
+}
+
+/**
+ * Builders answer last year's crowding, slowly. Automated building and public works add capacity.
+ */
+export function nextHousing(
+  housing: number,
+  pressure: number,
+  policies: Pick<Policies, "works">,
+  techs: Record<TechId, TechState>,
+): number {
+  let build = 0.003 + clamp((pressure - 0.97) * 0.2, 0, 0.009);
+  if (techs.housing?.on) build += 0.006;
+  if (policies.works) build += 0.004;
+  return Math.round(housing * (1 + build));
+}
+
+/**
+ * One year of arrivals. Newcomers look for work right away, but only half settle into a job and a home
+ * each year, so the hiring they bring trails them by a year or two.
+ */
+export function nextMigration(
+  prev: MigrationState,
+  prevPop: number,
+  pop: number,
+  policies: Pick<Policies, "gates" | "works">,
+  techs: Record<TechId, TechState>,
+): MigrationState {
+  const arrivals = Math.max(0, pop - prevPop - prevPop * NATURAL_GROWTH);
+  const target = policies.gates === "open" ? 1 : policies.gates === "tight" ? -1 : 0;
+  const step = clamp(target - prev.gateRamp, -GATE_RAMP_STEP, GATE_RAMP_STEP);
+  const pressure = prevPop / Math.max(1, prev.housing);
+  return {
+    newcomers: Math.round(prev.newcomers * (1 - SETTLE_RATE) + arrivals),
+    housing: nextHousing(prev.housing, pressure, policies, techs),
+    gateRamp: clamp(prev.gateRamp + step, -1, 1),
+  };
+}
+
+/**
+ * How a new wave plays out, from how far stability has fallen. `cut` and `closed` are for normal police;
+ * the police budget in force each year scales them (see waveDamage). The budget at the start sets the length.
+ */
+export function waveFor(stability: number, police: Police, year: number, line: number): UnrestWave {
+  const rule = POLICE[asPolice(police)];
+  const severity = clamp((UNREST_START - stability) / 50, 0, 1);
+  const length = clamp((severity >= 0.3 ? 2 : 1) - rule.shorten, 1, 2);
+  return {
+    started: year,
+    yearsLeft: length,
+    length,
+    cut: clamp(0.05 + 0.1 * severity, 0.05, 0.15),
+    closed: clamp(0.02 + 0.04 * severity, 0.02, 0.06),
+    line,
+  };
+}
+
+/**
+ * Close the unrest books for a year that ended at `stability`.
+ * A line fires once on the way down; it re-arms only after stability climbs back above it.
+ * After a wave starts, lines crossed during the cooldown pass without a new wave.
+ */
+export function nextUnrest(
+  prev: UnrestState,
+  stability: number,
+  police: Police,
+  year: number,
+): { unrest: UnrestState; started: UnrestWave | null } {
+  // Strong police brought in mid-wave clear the roads a year early.
+  const extra = asPolice(police) === "strong" ? 1 : 0;
+  let wave = prev.wave ? { ...prev.wave, yearsLeft: prev.wave.yearsLeft - 1 - extra } : null;
+  if (wave && wave.yearsLeft <= 0) wave = null;
+  // The cooldown covers the years the wave's damage plays out, so it blocks before it ticks down.
+  const blocked = prev.cooldown > 0;
+  const cooldown = Math.max(0, prev.cooldown - 1);
+  const fired = prev.fired.filter((line) => stability <= line);
+  const calmedBefore = prev.calmed.filter((line) => stability <= line);
+  const crossed = UNREST_LINES.filter((line) => stability < line && !fired.includes(line));
+  if (crossed.length === 0) {
+    return { unrest: { fired, cooldown, wave, calmed: calmedBefore }, started: null };
+  }
+  const nowFired = [...fired, ...crossed].sort((a, b) => b - a);
+  if (blocked) {
+    return {
+      unrest: { fired: nowFired, cooldown, wave, calmed: [...calmedBefore, ...crossed].sort((a, b) => b - a) },
+      started: null,
+    };
+  }
+  const started = waveFor(stability, police, year, Math.min(...crossed));
+  return { unrest: { fired: nowFired, cooldown: UNREST_COOLDOWN, wave: started, calmed: calmedBefore }, started };
+}
+
+/** Business lost to the current wave this year: blockade cut by sector, and looted shops still shut. */
+export function waveDamage(
+  wave: UnrestWave | null,
+  police: Police = "normal",
+): { cut: Partial<Record<SectorId, number>>; closed: number; share: number } {
+  if (!wave || wave.yearsLeft <= 0) return { cut: {}, closed: 0, share: 0 };
+  const damage = POLICE[asPolice(police)].damage;
+  const share = clamp(wave.cut * damage, 0.03, 0.15);
+  const cut: Partial<Record<SectorId, number>> = {};
+  for (const id of BLOCKADE_SECTORS) cut[id] = share;
+  // Looted shops reopen as the wave winds down.
+  const closed = clamp(wave.closed * damage, 0.01, 0.08) * (wave.yearsLeft / Math.max(1, wave.length));
+  return { cut, closed, share };
 }
 
 /** Labor detail for a city saved before AI adoption existed: youth from the usual ratio, nothing frozen. */
@@ -2076,6 +2363,8 @@ export function ensureTrail(state: TrailInput): Ledger {
     energy,
     ai: asAi(state.ai),
     jobs: asJobs(state.jobs, state),
+    unrest: asUnrest(state.unrest, state.stability),
+    migration: asMigration(state.migration, state.population, policies.gates),
     loans,
     debt,
     crime: state.crime ?? crimeIndex(state.unemployment, worstCover(covers), state.policies.stipend || state.policies.dividend),
@@ -2088,6 +2377,8 @@ export function ensureTrail(state: TrailInput): Ledger {
           policies: cleanPolicies(state.shadow.policies),
           ai: asAi(state.shadow.ai),
           jobs: asJobs(state.shadow.jobs, state.shadow),
+          unrest: asUnrest(state.shadow.unrest, state.shadow.stability),
+          migration: asMigration(state.shadow.migration, state.shadow.population, cleanPolicies(state.shadow.policies).gates),
           loans: shadowLoans,
           debt: debtOf(shadowLoans),
           inflation: state.shadow.inflation ?? INFLATION_TARGET,
@@ -2342,7 +2633,8 @@ function spendTotal(spend: SpendParts): number {
     spend.principal +
     spend.construction +
     (spend.research ?? 0) +
-    (spend.publicJobs ?? 0)
+    (spend.publicJobs ?? 0) +
+    (spend.police ?? 0)
   );
 }
 
@@ -2411,7 +2703,18 @@ function settle(
   const covers = coverOf(population, jobsForDemand, builtWorks, state.year + 1, machines, priced);
   const needsMet = policies.stipend || policies.dividend || policies.ownership === "citizens";
   const protest = willProtest(covers, state.unemployment, state.stability, needsMet);
-  const gentle = !deepening && statuteLabels(state, techs).length === 0 && !protest && worstCover(covers) >= 0.95;
+  const unrest0 = asUnrest(state.unrest, state.stability);
+  const damage = waveDamage(unrest0.wave, asPolice(policies.police));
+  const migration = nextMigration(
+    asMigration(state.migration, state.population, state.policies.gates),
+    state.population,
+    population,
+    policies,
+    techs,
+  );
+  const demandPop = population - NEWCOMER_DEMAND_GAP * migration.newcomers;
+  const gentle =
+    !deepening && statuteLabels(state, techs).length === 0 && !protest && worstCover(covers) >= 0.95;
   const prevEmployed = new Map(state.sectors.map((sector) => [sector.id, sector.employed]));
   const ai0 = asAi(state.ai);
   const adoption = nextAdoption(ai0.adoption, state.year + 1, policies, state.unemployment);
@@ -2443,6 +2746,7 @@ function settle(
     adoption,
     prevAdoption: ai0.adoption,
     prevYouthGap: ai0.youthGap,
+    extra: { gateRamp: migration.gateRamp, demandPop, cut: damage.cut, closed: damage.closed },
   });
   let withCrews = econ;
   let treasury = state.treasury + withCrews.taxRevenue - withCrews.spending;
@@ -2471,8 +2775,10 @@ function settle(
   const researched = book ? tickResearch(finalEnergy, researchFunded) : { energy: finalEnergy, finished: null };
   finalEnergy = researched.energy;
   const researchLabels = researched.finished ? [`Research done · ${researchDef(researched.finished).name}`] : [];
-  const crime = crimeIndex(withCrews.unemployment, worstCover(covers), needsMet);
-  const stability = nextStability(
+  const police = POLICE[asPolice(policies.police)];
+  const crime = clamp(Math.round(crimeIndex(withCrews.unemployment, worstCover(covers), needsMet) * police.crime), 0, 100);
+  const pressure = population / Math.max(1, migration.housing);
+  const calmStability = nextStability(
     { ...state, policies, crime, protest, covers },
     withCrews,
     treasury,
@@ -2483,16 +2789,31 @@ function settle(
       taken: rescue.taken.length,
       debt: debtOf(loans),
       austerity: austerity.length > 0,
+      social: police.stability - crowdingPenalty(pressure),
     },
   );
-  const nextView = { ...withCrews, stability, treasury };
   const year = state.year + 1;
+  const unrestStep = nextUnrest(unrest0, calmStability, asPolice(policies.police), year);
+  const stability = unrestStep.started ? clamp(calmStability - UNREST_HIT, 0, 100) : calmStability;
+  const newlyCalmed = unrestStep.unrest.calmed.filter((line) => !unrest0.calmed.includes(line));
+  const nextView = { ...withCrews, stability, treasury };
   const labels = book
     ? [
         ...statuteLabels(state, techs),
         ...openedPlants,
         ...researchLabels,
         ...(protest ? ["Protest"] : []),
+        ...(unrestStep.started ? [`Protest wave · below ${unrestStep.started.line}`] : []),
+        // A police budget change is logged, but it is not a statute: it does not unsettle hiring.
+        ...(asPolice(state.enacted?.police) !== asPolice(policies.police)
+          ? [
+              asPolice(policies.police) === "strong"
+                ? "Police force strengthened"
+                : asPolice(policies.police) === "low"
+                  ? "Police budget cut"
+                  : "Police back to normal",
+            ]
+          : []),
         ...(austerity.length > 0 ? ["Austerity"] : []),
       ]
     : [];
@@ -2517,6 +2838,8 @@ function settle(
     energy: finalEnergy,
     ai: { adoption, youthGap: withCrews.youthGap },
     jobs: withCrews.jobs,
+    unrest: unrestStep.unrest,
+    migration,
     priceIndex: withCrews.priceIndex,
     inflation: withCrews.inflation,
     wageScale: withCrews.wageScale,
@@ -2536,6 +2859,12 @@ function settle(
           loans: rescue.taken.map((loan) => `Loan ${loan.name} at ${(loan.rate * 100).toFixed(1)}%`),
           austerity,
           research: researched.finished ? researchDef(researched.finished).name : null,
+          wave: unrestStep.started,
+          ongoing: unrest0.wave ? { ...unrest0.wave, cut: damage.share } : null,
+          police: asPolice(policies.police),
+          calmed: newlyCalmed.length > 0 ? Math.min(...newlyCalmed) : null,
+          crowded: Math.max(0, Math.round(population - migration.housing)),
+          newcomers: migration.newcomers,
           oil: { from: energy0.oilPrice, to: oilPrice, share: oilShock !== 0 || energy0.fleet.oil.crew + energy0.fleet.oil.auto > 0 },
         })
       : "",
@@ -2635,6 +2964,16 @@ function writeBulletin(
     austerity?: string[];
     research?: string | null;
     oil?: { from: number; to: number; share: boolean };
+    /** A protest wave that broke out at this close. */
+    wave?: UnrestWave | null;
+    /** The wave whose damage this year carried. */
+    ongoing?: UnrestWave | null;
+    police?: Police;
+    /** A stability line crossed during the cooldown, with no new wave. */
+    calmed?: number | null;
+    /** People without a home slot. */
+    crowded?: number;
+    newcomers?: number;
   },
 ): string {
   let worst: { name: string; delta: number } | null = null;
@@ -2705,6 +3044,26 @@ function writeBulletin(
   );
   const stable = sentences.find((line) => line.startsWith("Stability")) ?? "";
   const cityLines: string[] = [];
+  if (city?.wave) {
+    const fresh = waveDamage(city.wave, city.police ?? "normal");
+    const w = { ...city.wave, cut: fresh.share, closed: fresh.closed };
+    const years = w.length === 1 ? "next year" : `the next ${w.length} years`;
+    cityLines.push(
+      `Protests broke out as stability fell below ${w.line}. Road blockades will cut shop, office and freight business about ${formatPct(w.cut)} for ${years}, and looting shut ${formatPct(w.closed)} of shops.`,
+    );
+  } else if (city?.ongoing) {
+    const left = city.ongoing.yearsLeft - 1 - (city.police === "strong" ? 1 : 0);
+    cityLines.push(
+      left > 0
+        ? `Protesters blocked roads again: business lost about ${formatPct(city.ongoing.cut)}. One more year to go.`
+        : `Protesters blocked roads one last year: business lost about ${formatPct(city.ongoing.cut)}. Looted shops are reopening.`,
+    );
+  } else if (city?.calmed != null) {
+    cityLines.push(`Stability slipped below ${city.calmed}, but people are waiting to see if the last protests changed anything.`);
+  }
+  if (city?.crowded && city.crowded > next.laborForce * 0.008) {
+    cityLines.push(`Homes are short by about ${formatInt(city.crowded)} places. Rents are climbing and tempers with them.`);
+  }
   if (city?.opened.length) cityLines.push(`${listNames(city.opened.map((line) => line.replace(" opened", "")))} opened.`);
   if (city?.research) cityLines.push(`${city.research} research is done.`);
   if (city?.austerity?.length) cityLines.push(`${city.austerity[0]}.`);
@@ -2763,7 +3122,7 @@ function nextStability(
   treasury: number,
   newTechCount: number,
   techs: Record<TechId, TechState>,
-  fiscal: { rescued: boolean; taken: number; debt: number; austerity?: boolean } = {
+  fiscal: { rescued: boolean; taken: number; debt: number; austerity?: boolean; social?: number } = {
     rescued: false,
     taken: 0,
     debt: 0,
@@ -2834,6 +3193,8 @@ function nextStability(
   if (worst < 0.98) delta -= (0.98 - worst) * 45;
   if (prev.crime > 22) delta -= (prev.crime - 22) * 0.09;
   if (prev.protest) delta -= 5;
+  // Crowding and a heavy police hand.
+  delta += fiscal.social ?? 0;
   const shock =
     newTechCount >= 3 ||
     fiscal.rescued ||

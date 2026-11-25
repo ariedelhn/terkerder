@@ -214,8 +214,9 @@ test("quiet path unemployment moves both ways and stays off zero", () => {
   assert.ok(ups >= 3, `up years ${ups}`);
   assert.ok(downs >= 3, `down years ${downs}`);
   assert.ok(Math.min(...rates) > 0.025, `floor ${Math.min(...rates)}`);
-  // Firms' own AI and its power-hungry data centers push a city that never builds a plant a little higher.
-  assert.ok(Math.max(...rates) < 0.15, `peak ${Math.max(...rates)}`);
+  // Firms' own AI and its power-hungry data centers push a city that never builds a plant a little higher,
+  // and once its stability slides, protest blockades cost it jobs too.
+  assert.ok(Math.max(...rates) < 0.17, `peak ${Math.max(...rates)}`);
   const jobs = path.map((state) => state.employed);
   let jobUp = 0;
   let jobDown = 0;

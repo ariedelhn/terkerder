@@ -1,6 +1,7 @@
 import {
   asOwnership,
   asPublicHiring,
+  asPolice,
   ensureTrail,
   type Gates,
   type Ledger,
@@ -94,6 +95,7 @@ export function asPolicies(value: unknown): Policies | null {
     ownership: asOwnership(value.ownership),
     publicHiring: asPublicHiring(value.publicHiring),
     aiLevy: value.aiLevy === true,
+    police: asPolice(value.police),
   };
 }
 

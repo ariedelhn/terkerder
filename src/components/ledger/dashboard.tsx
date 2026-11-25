@@ -55,6 +55,10 @@ import {
   utilityJobs,
   worksJobCount,
   type Gates,
+  type Police,
+  asPolice,
+  housingPressure,
+  POLICE,
   type Ledger,
   type Policies,
   type PublicHiring,
@@ -1603,6 +1607,30 @@ function PolicyList({
           />
         ))}
       </ChoiceGroup>
+      <p className="-mt-2 text-sm text-muted-foreground" data-testid="housing-note">
+        Newcomers look for work right away, but take a year or two to find a job and a home, so the hiring
+        they bring comes later. Homes are {Math.round(housingPressure(ledger) * 100)}% full
+        {housingPressure(ledger) > 1
+          ? ". The city is crowded: rents climb and stability suffers until builders catch up."
+          : ". Above 100%, crowding and rents hurt stability."}
+      </p>
+
+      <ChoiceGroup label="Police">
+        {POLICE_CHOICES.map(([id, title, detail]) => (
+          <Choice
+            key={id}
+            pressed={asPolice(ledger.policies.police) === id}
+            title={title}
+            detail={`${detail} · ${formatMarks(ledger.population * POLICE[id].perCapita * Math.max(ledger.wageScale ?? 1, 0.2))}`}
+            onClick={() => onPolicy("police", id)}
+          />
+        ))}
+      </ChoiceGroup>
+      <p className="-mt-2 text-sm text-muted-foreground" data-testid="police-note">
+        Each time stability falls past another 5-point line below 70, a protest wave breaks out: road blockades and
+        looting. Strong police end waves sooner and do less damage, but cost more and people resent a heavy hand.
+        A thin force saves money and lets waves run longer.
+      </p>
 
       <div className="overflow-hidden rounded-xl border border-border bg-card">
         <ToggleRow
@@ -1699,6 +1727,7 @@ function PolicyList({
 function Outlay({ ledger }: { ledger: Ledger }) {
   const rows = [
     ["Standing services", ledger.spend.standing],
+    ["Police", ledger.spend.police ?? 0],
     ["Jobless stipend", ledger.spend.stipend],
     ["Citizen dividend", ledger.spend.dividend],
     ["Public works", ledger.spend.works],
@@ -1766,6 +1795,12 @@ function TechList({ ledger, onToggle }: { ledger: Ledger; onToggle: (id: TechId)
     </div>
   );
 }
+
+const POLICE_CHOICES: readonly [Police, string, string][] = [
+  ["low", "Low", "Waves last longer"],
+  ["normal", "Normal", "Opening rule"],
+  ["strong", "Strong", "Shorter, milder waves"],
+];
 
 const PUBLIC_HIRING_CHOICES: readonly [PublicHiring, string][] = [
   ["off", "Off"],
