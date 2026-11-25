@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   ArrowRight,
+  Briefcase,
   GraduationCap,
   HardHat,
   HeartPulse,
@@ -19,6 +20,9 @@ import {
 import {
   CITIZEN_PAYOUT,
   CHARTERS,
+  FIRM_AI,
+  LEVY_TAKE,
+  PUBLIC_JOB_OVERHEAD,
   DIVIDEND_PER,
   LOAN_SIZE,
   LOAN_TERM,
@@ -33,6 +37,8 @@ import {
   borrow,
   dueThisYear,
   interestRemaining,
+  jobsGap,
+  publicHires,
   nextLoanRate,
   openingState,
   plantJobs,
@@ -51,6 +57,7 @@ import {
   type Gates,
   type Ledger,
   type Policies,
+  type PublicHiring,
   type SectorId,
   type ServiceId,
   type TechId,
@@ -116,6 +123,7 @@ const SECTOR_TEXT: Record<SectorId, string> = {
   health: "text-coral",
   education: "text-water",
   law: "text-danger",
+  office: "text-accent",
 };
 
 const SECTOR_BAR: Record<SectorId, string> = {
@@ -128,6 +136,7 @@ const SECTOR_BAR: Record<SectorId, string> = {
   health: "bg-coral",
   education: "bg-water",
   law: "bg-danger",
+  office: "bg-accent",
 };
 
 const SECTOR_ICON: Record<SectorId, LucideIcon> = {
@@ -140,6 +149,7 @@ const SECTOR_ICON: Record<SectorId, LucideIcon> = {
   health: HeartPulse,
   education: GraduationCap,
   law: Shield,
+  office: Briefcase,
 };
 
 export function Dashboard() {
@@ -190,6 +200,7 @@ export function Dashboard() {
   const word = stabilityWord(stability);
   const priorMark = ledger.history.length >= 2 ? ledger.history[ledger.history.length - 2] : null;
   const reserveChange = priorMark ? ledger.treasury - priorMark.treasury : null;
+  const gapNow = jobsGap(ledger.history);
 
   function selectTab(next: Tab) {
     setTab(next);
@@ -432,7 +443,24 @@ export function Dashboard() {
                 testId="real-wage"
                 tone="gold"
               />
+              <Metric
+                label="Youth unemployment"
+                value={formatPct(ledger.jobs.youthUnemployment)}
+                unit="of teens and early twenties looking"
+                delta={null}
+                testId="youth-unemployment"
+                tone={ledger.jobs.youthUnemployment > 0.3 ? "danger" : "coral"}
+              />
+              <Metric
+                label="Missing jobs"
+                value={gapNow ? formatInt(Math.max(0, gapNow.gap)) : "—"}
+                unit={gapNow && gapNow.gap > 0 ? "fewer than output growth suggests" : "none: jobs keep pace with output"}
+                delta={null}
+                testId="jobs-gap"
+                tone={gapNow && gapNow.gap > ledger.laborForce * 0.05 ? "danger" : "default"}
+              />
             </section>
+            <AiFigures ledger={ledger} />
             <div className="mt-4">
               <ServiceMeters ledger={ledger} onOpen={() => selectTab("city")} />
             </div>
@@ -1498,7 +1526,7 @@ function SectorList({ ledger }: { ledger: Ledger }) {
                     <span className="text-muted-foreground"> · {formatSignedInt(delta)} this year</span>
                   ) : null}
                 </p>
-                <p className="mt-2 text-sm text-muted-foreground">{automationLabel(sector.id, ledger.techs)}</p>
+                <p className="mt-2 text-sm text-muted-foreground">{automationLabel(sector.id, ledger.techs, ledger.ai.adoption)}</p>
                 <div className="meter mt-3 h-1.5 overflow-hidden rounded-full bg-border" aria-hidden="true">
                   <span className={`block h-full ${SECTOR_BAR[sector.id]}`} style={{ width: `${Math.round(share * 100)}%` }} />
                 </div>
@@ -1528,6 +1556,13 @@ function PolicyList({
 }) {
   const tax = ledger.policies.tax;
   const gates = ledger.policies.gates;
+  const displacedNow = displacedWorkers(ledger);
+  const publicWage = publicPay(ledger);
+  const someCost = publicHires("some", displacedNow, ledger.population) * publicWage * PUBLIC_JOB_OVERHEAD;
+  const hiringCost =
+    ledger.hasClosedYear && ledger.spend.publicJobs > 0
+      ? ledger.spend.publicJobs
+      : publicHires(asHiring(ledger.policies.publicHiring), displacedNow, ledger.population) * publicWage * PUBLIC_JOB_OVERHEAD;
   return (
     <div className="flex flex-col gap-4">
       <ChoiceGroup label="Tax band">
@@ -1606,6 +1641,32 @@ function PolicyList({
           last
         />
       </div>
+      <ChoiceGroup label="Public hiring for displaced workers">
+        {PUBLIC_HIRING_CHOICES.map(([id, title]) => (
+          <Choice
+            key={id}
+            pressed={asHiring(ledger.policies.publicHiring) === id}
+            title={title}
+            detail={id === "off" ? "No extra jobs" : `~${formatInt(publicHires(id, displacedNow, ledger.population))} jobs`}
+            onClick={() => onPolicy("publicHiring", id)}
+          />
+        ))}
+      </ChoiceGroup>
+      <p className="-mt-2 text-sm text-muted-foreground">
+        Health, schools, and city hall hire people AI pushed out. Unemployment looks lower, but the city pays every one of those wages, every year.
+        {asHiring(ledger.policies.publicHiring) !== "off"
+          ? ` About ${formatMarks(hiringCost)} a year at today's pay.`
+          : ` Some would cost about ${formatMarks(someCost)} a year.`}
+      </p>
+      <div className="overflow-hidden rounded-xl border border-border bg-card">
+        <ToggleRow
+          title="AI levy"
+          detail={`Firms adopt AI on their own at half the pace, and pay ${Math.round(LEVY_TAKE * 100)}% more of machine profit in tax. Private hiring dips about 1%.`}
+          on={ledger.policies.aiLevy}
+          onToggle={() => onPolicy("aiLevy", !ledger.policies.aiLevy)}
+          last
+        />
+      </div>
       <fieldset className="mt-4">
         <legend className="mb-2 text-sm font-medium text-muted-foreground">Who owns the machine profits</legend>
         <div className="flex flex-col gap-2">
@@ -1642,6 +1703,7 @@ function Outlay({ ledger }: { ledger: Ledger }) {
     ["Citizen dividend", ledger.spend.dividend],
     ["Public works", ledger.spend.works],
     ["Retraining", ledger.spend.retrain],
+    ["Public hiring", ledger.spend.publicJobs ?? 0],
     ["Loan interest", ledger.spend.interest],
     ["Loan principal", ledger.spend.principal],
   ].filter((row, index) => index === 0 || (row[1] as number) > 0);
@@ -1702,6 +1764,111 @@ function TechList({ ledger, onToggle }: { ledger: Ledger; onToggle: (id: TechId)
       })}
       </div>
     </div>
+  );
+}
+
+const PUBLIC_HIRING_CHOICES: readonly [PublicHiring, string][] = [
+  ["off", "Off"],
+  ["some", "Some"],
+  ["big", "Big"],
+];
+
+function asHiring(value: unknown): PublicHiring {
+  return value === "some" || value === "big" ? value : "off";
+}
+
+/** Workers machines and firms' AI have displaced, at today's city size. */
+function displacedWorkers(ledger: Ledger): number {
+  return ledger.sectors.reduce((sum, sector) => sum + (sector.automatons ?? 0), 0);
+}
+
+/** Average yearly pay across health, education, and government. */
+function publicPay(ledger: Ledger): number {
+  const ids: SectorId[] = ["health", "education", "government"];
+  const rows = ledger.sectors.filter((sector) => ids.includes(sector.id));
+  const people = rows.reduce((sum, sector) => sum + sector.employed, 0);
+  if (people <= 0) return 42_000;
+  return rows.reduce((sum, sector) => sum + sector.employed * sector.wage, 0) / people;
+}
+
+function AiFigures({ ledger }: { ledger: Ledger }) {
+  const jobs = ledger.jobs;
+  const adoption = ledger.ai.adoption;
+  const gap = jobsGap(ledger.history);
+  const office = adoption.office ?? 0;
+  const firmSectors = SECTORS.filter((sector) => FIRM_AI[sector.id].ceiling > 0);
+  const firmShare =
+    firmSectors.reduce((sum, sector) => {
+      const snap = ledger.sectors.find((item) => item.id === sector.id);
+      return sum + (adoption[sector.id] ?? 0) * ((snap?.employed ?? 0) + (snap?.automatons ?? 0));
+    }, 0) /
+    Math.max(
+      1,
+      firmSectors.reduce((sum, sector) => {
+        const snap = ledger.sectors.find((item) => item.id === sector.id);
+        return sum + (snap?.employed ?? 0) + (snap?.automatons ?? 0);
+      }, 0),
+    );
+  const owner =
+    ledger.policies.ownership === "firms" ? "Firms keep the profit, so they adopt at full pace." : ledger.policies.ownership === "city" ? "The city takes much of the profit, so firms adopt a little slower." : "Residents share the profit, so firms adopt slower.";
+  return (
+    <section className="mt-4 rounded-xl border border-border bg-card px-4 py-4" aria-label="AI at work" data-testid="ai-figures">
+      <h2 className="font-sans text-sm font-medium text-muted-foreground">AI at work</h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Firms hand work to AI on their own, desk jobs first. Few people are fired: firms just stop replacing the people who leave, and stop hiring new graduates. {owner}
+        {ledger.policies.aiLevy ? " The AI levy halves their pace." : ""}
+      </p>
+      <dl className="mt-3 flex flex-col gap-2 text-base">
+        <div className="flex items-baseline justify-between gap-3">
+          <dt>Office work done by AI</dt>
+          <dd className="tabular-nums text-accent" data-testid="ai-office">{formatPct(office)}</dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt>Private work done by firms&apos; AI</dt>
+          <dd className="tabular-nums">{formatPct(firmShare)}</dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt>Jobs firms gave to AI</dt>
+          <dd className="tabular-nums">{formatInt(jobs.aiJobs)}</dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt>Openings left unfilled this year</dt>
+          <dd className="tabular-nums" data-testid="ai-frozen">{formatInt(jobs.frozen)}</dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt>Young people without a job</dt>
+          <dd className="tabular-nums">
+            {formatInt(jobs.youthUnemployed)} of {formatInt(jobs.youthLooking)}
+          </dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt>Desk workers still jobless</dt>
+          <dd className={`tabular-nums ${jobs.officeJobless > ledger.laborForce * 0.02 ? "text-warn" : ""}`}>{formatInt(jobs.officeJobless)}</dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt>Desk workers now in shops and services</dt>
+          <dd className="tabular-nums">{formatInt(jobs.downshift)}</dd>
+        </div>
+        <div className="flex items-baseline justify-between gap-3">
+          <dt>Extra public jobs</dt>
+          <dd className="tabular-nums">
+            {formatInt(jobs.publicJobs)}
+            {ledger.spend.publicJobs > 0 ? ` · ${formatMarks(ledger.spend.publicJobs)}/yr` : ""}
+          </dd>
+        </div>
+        {gap ? (
+          <div className="flex items-baseline justify-between gap-3 border-t border-border pt-2">
+            <dt>Jobs expected from output</dt>
+            <dd className="tabular-nums">
+              {formatInt(gap.expected)} vs {formatInt(gap.actual)}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+      <p className="mt-2 text-sm text-subtle">
+        Desk workers who lose out crowd into shop work and push that pay down. Jobless desk workers and shut-out young people weigh on stability more than other unemployment.
+      </p>
+    </section>
   );
 }
 

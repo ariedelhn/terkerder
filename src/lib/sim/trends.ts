@@ -1,4 +1,4 @@
-import { PARTICIPATION, type StatuteEvent, type YearMark } from "./engine.ts";
+import { jobsGapSeries, PARTICIPATION, type StatuteEvent, type YearMark } from "./engine.ts";
 
 export type SeriesId =
   | "unemployment"
@@ -13,6 +13,8 @@ export type SeriesId =
   | "priceIndex"
   | "inflation"
   | "profit"
+  | "youth"
+  | "jobsGap"
   | "stability";
 
 export type ChartRow = {
@@ -35,6 +37,8 @@ export function readSeries(mark: YearMark, id: SeriesId): number {
   if (id === "priceIndex") return mark.priceIndex ?? 100;
   if (id === "inflation") return mark.inflation ?? 0.02;
   if (id === "profit") return mark.profit ?? 0;
+  if (id === "youth") return mark.youthUnemployment ?? Math.min(0.9, mark.unemployment * 1.8 + 0.015);
+  if (id === "jobsGap") return 0;
   return mark[id];
 }
 
@@ -100,4 +104,19 @@ export function statuteGroups(events: StatuteEvent[], limit = 5): { year: number
     else groups.push({ year: event.year, labels: [event.label] });
   }
   return groups.slice(-limit).reverse();
+}
+
+export type JobsGapRow = { year: number; actual: number; expected: number; gap: number };
+
+/**
+ * Jobs the city has against jobs its output growth would predict. Years saved before output was
+ * tracked are skipped, so an old city's line starts the year it was loaded.
+ */
+export function jobsGapRows(history: YearMark[]): JobsGapRow[] {
+  return jobsGapSeries(history).map((row) => ({
+    year: row.year,
+    actual: row.actual,
+    expected: row.expected,
+    gap: row.gap,
+  }));
 }

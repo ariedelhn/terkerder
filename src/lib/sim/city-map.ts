@@ -21,6 +21,8 @@ const SHOP_JOBS = 500;
 const SHOP_RESIDENTS = 10_000;
 const MACHINES_PER_CAMPUS = 4_000;
 const AUTO_PLANTS_PER_HALL = 2;
+const OFFICE_JOBS_PER_TOWER = 450;
+const MAX_OFFICES = 10;
 
 export type Terrain = "sea" | "river" | "land";
 export type Zone = "residential" | "commercial" | "industrial" | "none";
@@ -28,6 +30,7 @@ export type BuildingKind =
   | "empty"
   | "house"
   | "shop"
+  | "office"
   | "dock"
   | "power"
   | "solar"
@@ -62,6 +65,8 @@ export type CityMapModel = {
     homes: number;
     homeUnits: number;
     shops: number;
+    offices: number;
+    emptyOffices: number;
     docks: number;
     power: number;
     water: number;
@@ -357,6 +362,20 @@ export function shopCount(ledger: Ledger): number {
   return Math.max(6, Math.min(SHOP_LOTS.length, raw));
 }
 
+/**
+ * Office towers sit at the back of the shopping district. A tower empties as firms hand its desk
+ * work to AI: the building stays, the lights go out.
+ */
+export function officeTowers(ledger: Ledger): { total: number; busy: number } {
+  const office = (ledger.sectors ?? []).find((sector) => sector.id === "office");
+  if (!office) return { total: 0, busy: 0 };
+  const employed = Math.max(0, office.employed ?? 0);
+  const size = employed + Math.max(0, office.automatons ?? 0);
+  const total = Math.max(2, Math.min(MAX_OFFICES, Math.round(size / OFFICE_JOBS_PER_TOWER)));
+  const busy = Math.max(0, Math.min(total, Math.round((employed / Math.max(1, size)) * total)));
+  return { total, busy };
+}
+
 export function homeUnits(population: number): number {
   return Math.max(0, Math.round(population / PEOPLE_PER_HOME_UNIT));
 }
@@ -458,10 +477,21 @@ export function buildCityMap(ledger: Ledger): CityMapModel {
     homes += 1;
   }
 
-  const shopsWanted = shopCount(ledger);
+  const towers = officeTowers(ledger);
+  const shopsWanted = Math.min(shopCount(ledger), SHOP_LOTS.length - towers.total);
   for (let i = 0; i < shopsWanted; i += 1) {
     const [x, y] = SHOP_LOTS[i]!;
     place(x, y, { kind: "shop", density: 1, label: "Shops" });
+  }
+  // Busy towers sit deepest in the district; the ones nearest the shops go dark first.
+  for (let i = 0; i < towers.total; i += 1) {
+    const [x, y] = SHOP_LOTS[SHOP_LOTS.length - 1 - i]!;
+    const busy = i < towers.busy;
+    place(x, y, {
+      kind: "office",
+      density: busy ? 1 : 0,
+      label: busy ? "Offices" : "Empty offices · the desk work went to AI",
+    });
   }
 
   const works = worksOf(ledger);
@@ -545,6 +575,8 @@ export function buildCityMap(ledger: Ledger): CityMapModel {
       homes,
       homeUnits: Math.min(units, HOME_LOTS.length * 3),
       shops: shopsWanted,
+      offices: towers.busy,
+      emptyOffices: towers.total - towers.busy,
       docks: DOCKS.length,
       power: works.power.plants + works.power.auto,
       water: works.water.plants + works.water.auto,

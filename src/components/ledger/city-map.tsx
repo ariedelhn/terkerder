@@ -27,6 +27,7 @@ const ZONE_FILL_ALT: Record<Zone, string> = {
 const KIND_FILL: Partial<Record<BuildingKind, string>> = {
   house: "#2f7a4e",
   shop: "#2d5f96",
+  office: "#4a6f9a",
   dock: "#8a6a42",
   power: "#c47a2c",
   solar: "#27457a",
@@ -50,6 +51,7 @@ function houseFill(density: number): string {
 
 function fillOf(tile: MapTile): string {
   if (tile.kind === "house") return houseFill(tile.density);
+  if (tile.kind === "office" && tile.density <= 0) return "#26303c";
   if (tile.kind === "dock") return KIND_FILL.dock!;
   if (tile.kind !== "empty" && tile.kind !== "bridge" && KIND_FILL[tile.kind]) {
     return KIND_FILL[tile.kind]!;
@@ -90,6 +92,22 @@ function Icon({ tile }: { tile: MapTile }) {
       <g>
         <rect x="2.4" y="4.2" width="5.2" height="3" rx="0.3" fill="#e7eef8" opacity="0.9" />
         <path d="M2.2 4.2 L5 3.2 L7.8 4.2Z" fill="#f0c14a" />
+      </g>
+    );
+  }
+  if (k === "office") {
+    const lit = tile.density > 0;
+    return (
+      <g>
+        <rect x="3" y="1.6" width="4" height="6.8" rx="0.3" fill={lit ? "#dfe9f5" : "#5b6573"} opacity="0.92" />
+        <g fill={lit ? "#f0c14a" : "#2b323c"}>
+          <rect x="3.6" y="2.4" width="1" height="0.9" />
+          <rect x="5.4" y="2.4" width="1" height="0.9" />
+          <rect x="3.6" y="4.1" width="1" height="0.9" />
+          <rect x="5.4" y="4.1" width="1" height="0.9" />
+          <rect x="3.6" y="5.8" width="1" height="0.9" />
+          <rect x="5.4" y="5.8" width="1" height="0.9" />
+        </g>
       </g>
     );
   }
@@ -232,6 +250,8 @@ const LEGEND: readonly { color: string; label: string; mark?: "auto" }[] = [
   { color: "#8a6a42", label: "Docks" },
   { color: "#2f7a4e", label: "Homes" },
   { color: "#2d5f96", label: "Shops" },
+  { color: "#4a6f9a", label: "Offices" },
+  { color: "#26303c", label: "Empty offices" },
   { color: "#6a6328", label: "Industry" },
   { color: "#6a6d78", label: "Data" },
   { color: "#c47a2c", label: "Oil power" },
@@ -256,6 +276,7 @@ function summaryText(ledger: Ledger, map: ReturnType<typeof buildCityMap>): stri
     `${formatInt(ledger.population)} residents`,
     `${formatInt(counts.homes)} home tiles`,
     `${formatInt(counts.shops)} shops`,
+    `${formatInt(counts.offices)} busy offices${counts.emptyOffices > 0 ? `, ${formatInt(counts.emptyOffices)} empty` : ""}`,
     `${formatInt(plants)} utility plants`,
   ];
   if (energy.length > 0) parts.push(`Power from ${energy.join(", ")}`);
@@ -348,6 +369,7 @@ export function CityMap({ ledger }: { ledger: Ledger }) {
         </ul>
         <p className="px-0.5 pt-1 text-sm text-muted-foreground" data-testid="map-summary">
           {formatInt(map.counts.homes)} homes · {formatInt(map.counts.shops)} shops ·{" "}
+          {formatInt(map.counts.offices + map.counts.emptyOffices)} offices{map.counts.emptyOffices > 0 ? ` (${formatInt(map.counts.emptyOffices)} empty)` : ""} ·{" "}
           {formatInt(map.counts.power + map.counts.water + map.counts.waste)} plants ·{" "}
           {formatInt(map.counts.data)} data centers
         </p>

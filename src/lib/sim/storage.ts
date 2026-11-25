@@ -1,5 +1,6 @@
 import {
   asOwnership,
+  asPublicHiring,
   ensureTrail,
   type Gates,
   type Ledger,
@@ -26,6 +27,7 @@ const TECHS: readonly TechId[] = [
   "health",
   "education",
   "law",
+  "office",
 ];
 const SECTORS: readonly SectorId[] = [
   "housing",
@@ -37,7 +39,19 @@ const SECTORS: readonly SectorId[] = [
   "health",
   "education",
   "law",
+  "office",
 ];
+
+/**
+ * Cities saved before the office sector existed: desk jobs were counted inside services,
+ * transport, food, and government. Carve the same shares out so headcount is unchanged.
+ */
+const OFFICE_CARVE: Partial<Record<SectorId, number>> = {
+  services: 2800 / 7800,
+  transport: 400 / 5200,
+  food: 400 / 6400,
+  government: 400 / 3600,
+};
 
 const OLD_TECH: Record<string, TechId> = {
   cranes: "transport",
@@ -78,6 +92,8 @@ export function asPolicies(value: unknown): Policies | null {
     retrain: value.retrain,
     wageFloor: value.wageFloor,
     ownership: asOwnership(value.ownership),
+    publicHiring: asPublicHiring(value.publicHiring),
+    aiLevy: value.aiLevy === true,
   };
 }
 
@@ -134,7 +150,7 @@ function migrateCity(value: unknown): unknown {
     if (!isRecord(sector) || typeof sector.employed !== "number") return sum;
     return sum + sector.employed;
   }, 0);
-  const weights = [4200, 5200, 6400, 2800, 7800, 3600, 4800, 3400, 2400];
+  const weights = [4200, 4800, 6000, 2800, 5000, 3200, 4800, 3400, 2400, 3800];
   const weightSum = weights.reduce((sum, n) => sum + n, 0);
   const total = oldEmployed > 0 ? oldEmployed : 40600;
   const sectors = SECTORS.map((id, index) => ({
@@ -157,8 +173,63 @@ function migrateCity(value: unknown): unknown {
   return { ...value, techs, sectors, enactedTech, shadow };
 }
 
+function num(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/** Add the office sector and its automation switch to a city saved before they existed. */
+export function addOffice(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  let next: Record<string, unknown> = value;
+  if (Array.isArray(value.sectors) && !value.sectors.some((sector) => isRecord(sector) && sector.id === "office")) {
+    let moved = 0;
+    let movedPrev = 0;
+    let anyPrev = false;
+    let serviceWage = 36_400;
+    const sectors = value.sectors.map((sector) => {
+      if (!isRecord(sector)) return sector;
+      const share = OFFICE_CARVE[sector.id as SectorId] ?? 0;
+      if (sector.id === "services" && num(sector.wage) > 0) serviceWage = num(sector.wage);
+      if (share <= 0) return sector;
+      const take = Math.round(num(sector.employed) * share);
+      moved += take;
+      const prev = typeof sector.prevEmployed === "number" ? sector.prevEmployed : null;
+      let prevEmployed: number | null = prev;
+      if (prev != null) {
+        anyPrev = true;
+        const prevTake = Math.round(prev * share);
+        movedPrev += prevTake;
+        prevEmployed = prev - prevTake;
+      }
+      const automatons = num(sector.automatons);
+      return {
+        ...sector,
+        employed: num(sector.employed) - take,
+        prevEmployed,
+        automatons: Math.round(automatons * (1 - share)),
+      };
+    });
+    sectors.push({
+      id: "office",
+      employed: moved,
+      wage: Math.round((serviceWage * (52_000 / 36_400)) / 100) * 100,
+      prevEmployed: anyPrev ? movedPrev : null,
+      automatons: 0,
+    });
+    next = { ...next, sectors };
+  }
+  if (isRecord(next.techs) && !isTechState(next.techs.office)) {
+    next = { ...next, techs: { ...next.techs, office: { on: false, activeYears: 0 } } };
+  }
+  if (isRecord(next.enactedTech) && typeof next.enactedTech.office !== "boolean") {
+    next = { ...next, enactedTech: { ...next.enactedTech, office: false } };
+  }
+  if (isRecord(next.shadow)) next = { ...next, shadow: addOffice(next.shadow) };
+  return next;
+}
+
 export function reviveLedger(parsed: unknown): Ledger | null {
-  const migrated = migrateCity(parsed);
+  const migrated = addOffice(migrateCity(parsed));
   if (!isLedger(migrated)) return null;
   const loose = migrated as Ledger & {
     history?: unknown;

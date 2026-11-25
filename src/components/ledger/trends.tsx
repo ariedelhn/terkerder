@@ -11,12 +11,14 @@ import {
 } from "recharts";
 import type { Ledger, StatuteEvent } from "@/lib/sim/engine";
 import { formatInt, formatMarks, formatPct, formatSignedInt, formatSignedMarks, formatSignedPct, formatSignedPoints, formatSignedPp } from "@/lib/sim/format";
-import { bookChartRows, chartRows, latestGap, statuteGroups, type SeriesId } from "@/lib/sim/trends";
+import { bookChartRows, chartRows, jobsGapRows, latestGap, statuteGroups, type SeriesId } from "@/lib/sim/trends";
 
 const SERIES: readonly { id: SeriesId; label: string; stroke: string }[] = [
   { id: "unemployment", label: "Unemployment", stroke: "var(--color-coral)" },
   { id: "population", label: "People", stroke: "var(--color-water)" },
   { id: "employed", label: "Jobs", stroke: "var(--color-ok)" },
+  { id: "jobsGap", label: "Missing jobs", stroke: "var(--color-ok)" },
+  { id: "youth", label: "Youth jobless", stroke: "var(--color-coral)" },
   { id: "avgWage", label: "Wages", stroke: "var(--color-gold)" },
   { id: "taxRevenue", label: "Tax", stroke: "var(--color-violet)" },
   { id: "treasury", label: "Reserve", stroke: "var(--color-accent)" },
@@ -29,7 +31,7 @@ const SERIES: readonly { id: SeriesId; label: string; stroke: string }[] = [
 ];
 
 function formatValue(id: SeriesId, n: number): string {
-  if (id === "unemployment") return formatPct(n);
+  if (id === "unemployment" || id === "youth") return formatPct(n);
   if (id === "priceIndex") return String(Math.round(n));
   if (id === "inflation") return formatSignedPct(n);
   if (id === "taxRevenue" || id === "treasury" || id === "reserveChange" || id === "profit") return formatMarks(n);
@@ -38,7 +40,8 @@ function formatValue(id: SeriesId, n: number): string {
 }
 
 function formatAxis(id: SeriesId, n: number): string {
-  if (id === "unemployment") return `${Math.round(n * 100)}%`;
+  if (id === "unemployment" || id === "youth") return `${Math.round(n * 100)}%`;
+  if (id === "jobsGap" || id === "employed") return formatInt(n);
   if (id === "stability" || id === "priceIndex") return String(Math.round(n));
   if (id === "inflation") return `${Math.round(n * 100)}%`;
   if (id === "avgWage" || id === "wagePerCapita") return formatMarks(n);
@@ -110,14 +113,18 @@ export function Trends({ ledger }: { ledger: Ledger }) {
   useEffect(() => setMounted(true), []);
 
   const series = SERIES.find((item) => item.id === seriesId) ?? SERIES[0]!;
-  const books = series.id === "books";
+  const gapView = series.id === "jobsGap";
+  const books = series.id === "books" || gapView;
   const plotted: SeriesId = series.id === "avgWage" && wageView === "person" ? "wagePerCapita" : series.id;
   const rows = books ? [] : chartRows(ledger.history, ledger.pace, plotted);
-  const bookRows = bookChartRows(ledger.history).map((mark) => ({
-    year: String(mark.year),
-    income: mark.income,
-    expenses: mark.expenses,
-  }));
+  const bookRows = gapView
+    ? jobsGapRows(ledger.history).map((row) => ({ year: String(row.year), income: row.expected, expenses: row.actual }))
+    : bookChartRows(ledger.history).map((mark) => ({
+        year: String(mark.year),
+        income: mark.income,
+        expenses: mark.expenses,
+      }));
+  const lastGap = gapView && bookRows.length > 0 ? bookRows[bookRows.length - 1]! : null;
   const gap = books ? null : latestGap(rows, ledger.pace);
   const phrase = gap == null ? null : gapPhrase(plotted, gap);
   const current = rows.length > 0 ? rows[rows.length - 1]!.value : null;
@@ -133,7 +140,7 @@ export function Trends({ ledger }: { ledger: Ledger }) {
     eligible: row.eligible,
   }));
   const showEligible = plotted === "population";
-  const heading = books ? "Income and expenses" : plotted === "wagePerCapita" ? "Wage per person" : series.label;
+  const heading = gapView ? "Missing jobs" : books ? "Income and expenses" : plotted === "wagePerCapita" ? "Wage per person" : series.label;
   const stroke = plotted === "wagePerCapita" ? "var(--color-gold)" : series.stroke;
   const bookDomain = (() => {
     const nums = bookRows.flatMap((row) => [row.income, row.expenses]);
@@ -141,7 +148,7 @@ export function Trends({ ledger }: { ledger: Ledger }) {
     const min = Math.min(...nums);
     const max = Math.max(...nums);
     const pad = Math.max((max - min) * 0.08, 1);
-    return [Math.min(0, min - pad), max + pad] as [number, number];
+    return [gapView ? Math.max(0, min - pad * 3) : Math.min(0, min - pad), max + pad] as [number, number];
   })();
 
   const verb = heading === "People" || heading === "Jobs" || heading === "Wages" ? "are" : "is";
@@ -162,6 +169,12 @@ export function Trends({ ledger }: { ledger: Ledger }) {
   if (books) {
     note = "Green is tax income. Red is everything the city spent that year.";
   }
+  if (gapView) {
+    note =
+      bookRows.length > 0
+        ? "Green is the jobs the city's output growth would normally bring. Red is the jobs it has. The space between them is work AI does, or jobs that were never created."
+        : "This line starts once a year closes with output tracked.";
+  }
 
   return (
     <section className="min-w-0 rounded-xl border border-border bg-card px-4 py-4" aria-label="Trends" data-testid="trends">
@@ -175,7 +188,16 @@ export function Trends({ ledger }: { ledger: Ledger }) {
           <p className="text-sm text-subtle">Year {ledger.year}</p>
         )}
       </div>
-      {books && bookRows.length > 0 ? (
+      {lastGap ? (
+        <p className="mt-1 font-sans text-2xl font-semibold tabular-nums" data-testid="trend-value">
+          <span className={lastGap.income - lastGap.expenses > 0 ? "text-danger" : "text-ok"}>
+            {formatInt(Math.max(0, lastGap.income - lastGap.expenses))}
+          </span>
+          <span className="text-base font-medium text-muted-foreground">
+            {" "}missing · {formatInt(lastGap.expenses)} of {formatInt(lastGap.income)} expected
+          </span>
+        </p>
+      ) : books && bookRows.length > 0 ? (
         <p className="mt-1 font-sans text-2xl font-semibold tabular-nums" data-testid="trend-value">
           <span className="text-ok">{formatMarks(bookRows[bookRows.length - 1]!.income)}</span>
           <span className="text-muted-foreground"> / </span>
@@ -236,11 +258,11 @@ export function Trends({ ledger }: { ledger: Ledger }) {
           <>
             <span className="inline-flex items-center gap-2">
               <span className="inline-block h-0.5 w-4 bg-ok" />
-              Income
+              {gapView ? "Expected from output" : "Income"}
             </span>
             <span className="inline-flex items-center gap-2">
               <span className="inline-block h-0.5 w-4 bg-danger" />
-              Expenses
+              {gapView ? "Actual jobs" : "Expenses"}
             </span>
           </>
         ) : (
@@ -298,6 +320,7 @@ export function Trends({ ledger }: { ledger: Ledger }) {
                     label={props.label}
                     payload={props.payload as TipPayload[] | undefined}
                     id={plotted}
+                    gapView={gapView}
                     events={ledger.events}
                   />
                 )}
@@ -343,7 +366,7 @@ export function Trends({ ledger }: { ledger: Ledger }) {
                 <Line
                   type="linear"
                   dataKey="income"
-                  name="Income"
+                  name={gapView ? "Expected" : "Income"}
                   stroke="var(--color-ok)"
                   strokeWidth={2}
                   dot={false}
@@ -354,7 +377,7 @@ export function Trends({ ledger }: { ledger: Ledger }) {
                 <Line
                   type="linear"
                   dataKey="expenses"
-                  name="Expenses"
+                  name={gapView ? "Actual" : "Expenses"}
                   stroke="var(--color-danger)"
                   strokeWidth={2}
                   dot={false}
@@ -412,11 +435,13 @@ function TrendTip({
   label,
   id,
   events,
+  gapView = false,
 }: {
   active?: boolean;
   payload?: TipPayload[];
   label?: string | number;
   id: SeriesId;
+  gapView?: boolean;
   events: StatuteEvent[];
 }) {
   if (!active || !payload?.length) return null;
@@ -430,8 +455,15 @@ function TrendTip({
   return (
     <div className="rounded-lg border border-border bg-elevated px-3 py-2 text-sm text-foreground">
       <p className="font-medium">Year {label}</p>
-      {typeof income === "number" ? <p className="tabular-nums text-ok">Income {formatMarks(income)}</p> : null}
-      {typeof expenses === "number" ? <p className="tabular-nums text-danger">Expenses {formatMarks(expenses)}</p> : null}
+      {typeof income === "number" ? (
+        <p className="tabular-nums text-ok">{gapView ? `Expected ${formatInt(income)}` : `Income ${formatMarks(income)}`}</p>
+      ) : null}
+      {typeof expenses === "number" ? (
+        <p className="tabular-nums text-danger">{gapView ? `Actual ${formatInt(expenses)}` : `Expenses ${formatMarks(expenses)}`}</p>
+      ) : null}
+      {gapView && typeof income === "number" && typeof expenses === "number" ? (
+        <p className="tabular-nums">Gap {formatInt(income - expenses)}</p>
+      ) : null}
       {typeof value === "number" ? (
         <p className="tabular-nums">{id === "population" ? `Everyone ${formatValue(id, value)}` : formatValue(id, value)}</p>
       ) : null}

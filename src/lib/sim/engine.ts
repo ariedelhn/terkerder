@@ -36,7 +36,7 @@ export type { EnergyState, PowerKind, ResearchId } from "./energy.ts";
 
 export const BASE_POP = 72_000;
 export const PARTICIPATION = 0.6;
-export const STANDING_PER_CAPITA = 5_400;
+export const STANDING_PER_CAPITA = 5_200;
 export const STIPEND_PER = 11_000;
 export const DIVIDEND_PER = 1_200;
 export const WORKS_AT_BASE = 26_000_000;
@@ -52,6 +52,11 @@ export const PRICE_CENSUS = 100;
 export const WAGE_PASS_THROUGH = 0.85;
 /** One machine produces this many human-years of goods. */
 export const AUTOMATON_OUTPUT = 10;
+/**
+ * AI that firms adopt on their own is a drop-in replacement for a worker, not a rebuilt line:
+ * each job it takes makes about twice the goods, not ten times.
+ */
+export const FIRM_AI_OUTPUT = 2;
 /** Tax collected on machine profits, by who owns them. */
 export const PROFIT_TAKE = { firms: 0.12, city: 0.42, citizens: 0.55 } as const;
 /** Share of machine profits paid to residents when they own the machines. */
@@ -81,7 +86,8 @@ export type SectorId =
   | "government"
   | "health"
   | "education"
-  | "law";
+  | "law"
+  | "office";
 export type TechId =
   | "housing"
   | "transport"
@@ -91,7 +97,17 @@ export type TechId =
   | "government"
   | "health"
   | "education"
-  | "law";
+  | "law"
+  | "office";
+
+/** How hard the city hires into health, schools, and city hall to soak up displaced workers. */
+export type PublicHiring = "off" | "some" | "big";
+
+export const PUBLIC_HIRING_IDS: readonly PublicHiring[] = ["off", "some", "big"];
+
+export function asPublicHiring(value: unknown): PublicHiring {
+  return value === "some" || value === "big" ? value : "off";
+}
 
 export type Policies = {
   tax: TaxBand;
@@ -103,6 +119,10 @@ export type Policies = {
   wageFloor: boolean;
   /** Who receives the profit the machines create. */
   ownership: Ownership;
+  /** Public jobs in health, education, and government for displaced workers. Missing on older saves. */
+  publicHiring: PublicHiring;
+  /** A levy on AI that firms adopt on their own. Halves their pace. Missing on older saves. */
+  aiLevy: boolean;
 };
 
 export type TechState = { on: boolean; activeYears: number };
@@ -137,6 +157,8 @@ export type SpendParts = {
   principal: number;
   /** Energy research funded this year. Missing on older saves. */
   research: number;
+  /** Wages of the extra public jobs hired to soak up displaced workers. Missing on older saves. */
+  publicJobs: number;
 };
 
 export type ServiceId = "power" | "water" | "waste";
@@ -477,7 +499,204 @@ export type YearMark = {
   inflation?: number;
   /** Real price of imported oil, 1 at the census. */
   oilPrice?: number;
+  /** Real output in census coins. Drives the expected-jobs line. Missing on older years. */
+  output?: number;
+  /** Unemployment among teens and people in their early twenties. */
+  youthUnemployment?: number;
+  /** Jobs firms have handed to AI on their own. */
+  aiJobs?: number;
+  /** Extra public jobs filled to soak up displaced workers. */
+  publicJobs?: number;
 };
+
+export type AiState = {
+  /** Share of each sector's jobs firms have handed to AI on their own, 0 up to that sector's ceiling. */
+  adoption: Record<SectorId, number>;
+  /** Young entrants shut out because firms stopped refilling jobs. Fades as those cohorts age. */
+  youthGap: number;
+};
+
+export type JobsView = {
+  /** Teens and people in their early twenties who are looking for work. */
+  youthLooking: number;
+  youthUnemployed: number;
+  youthUnemployment: number;
+  /** Jobs firms have handed to AI on their own, at today's city size. */
+  aiJobs: number;
+  /** Positions that came open this year and were not refilled because AI took the work. */
+  frozen: number;
+  /** Extra public jobs filled in health, education, and government. */
+  publicJobs: number;
+  /** Displaced office workers who took lower-paid service and shop work. */
+  downshift: number;
+  /** Displaced office workers still without work. They are louder than most. */
+  officeJobless: number;
+  /** Real output in census coins. */
+  output: number;
+};
+
+/**
+ * How far and how fast firms hand each sector's work to AI on their own, at full maturity.
+ * Desk work goes first and furthest; hands-on and public work much later or never.
+ * Government and police are city jobs: only the player automates those.
+ */
+export const FIRM_AI: Record<SectorId, { ceiling: number; speed: number }> = {
+  office: { ceiling: 0.55, speed: 0.05 },
+  services: { ceiling: 0.3, speed: 0.018 },
+  transport: { ceiling: 0.3, speed: 0.015 },
+  food: { ceiling: 0.28, speed: 0.013 },
+  energy: { ceiling: 0.22, speed: 0.01 },
+  housing: { ceiling: 0.14, speed: 0.006 },
+  health: { ceiling: 0.1, speed: 0.004 },
+  education: { ceiling: 0.08, speed: 0.003 },
+  government: { ceiling: 0, speed: 0 },
+  law: { ceiling: 0, speed: 0 },
+};
+/** Firms adopt slower when they keep less of the profit. */
+export const OWNER_AI_PACE: Record<Ownership, number> = { firms: 1, city: 0.75, citizens: 0.65 };
+/** The AI levy halves firm adoption and taxes a further slice of machine profit. */
+export const LEVY_PACE = 0.5;
+export const LEVY_TAKE = 0.06;
+/** Share of unfilled positions that would have gone to young entrants. */
+export const ENTRY_SHARE = 0.55;
+/** Share of last year's shut-out youth who are still young and still shut out. */
+export const YOUTH_GAP_FADE = 0.7;
+/** Share of looking adults who are in their early twenties. */
+const YOUNG_ADULT_SHARE = 0.11;
+/** Share of displaced office workers who go after service and shop jobs. */
+export const DOWNSHIFT_SHARE = 0.4;
+/** Public hiring: share of displaced workers absorbed, a floor, and a cap as a share of the labor force. */
+export const PUBLIC_HIRING: Record<Exclude<PublicHiring, "off">, { share: number; floor: number; cap: number }> = {
+  some: { share: 0.3, floor: 350, cap: 0.035 },
+  big: { share: 0.6, floor: 800, cap: 0.075 },
+};
+const PUBLIC_SPLIT: Partial<Record<SectorId, number>> = { health: 0.45, education: 0.35, government: 0.2 };
+/** Benefits and supervision on top of each public wage. */
+export const PUBLIC_JOB_OVERHEAD = 1.1;
+/** Measured real output counts one machine as this many worker-years: what it makes keeps getting cheaper. */
+export const AI_GDP_WEIGHT = 3;
+/** Jobs per unit of output growth when there is too little pre-AI history to measure it. */
+export const OKUN_ELASTICITY = 1;
+const PRIVATE_SECTORS: ReadonlySet<SectorId> = new Set<SectorId>(["housing", "transport", "food", "energy", "services", "office"]);
+
+export function blankAdoption(): Record<SectorId, number> {
+  return {
+    housing: 0,
+    transport: 0,
+    food: 0,
+    energy: 0,
+    services: 0,
+    government: 0,
+    health: 0,
+    education: 0,
+    law: 0,
+    office: 0,
+  };
+}
+
+export function freshAi(): AiState {
+  return { adoption: blankAdoption(), youthGap: 0 };
+}
+
+/** Accept saved AI state or start fresh, clamping damaged numbers so the books stay numeric. */
+export function asAi(raw: unknown): AiState {
+  const base = freshAi();
+  if (typeof raw !== "object" || raw === null) return base;
+  const record = raw as Record<string, unknown>;
+  const adoption = base.adoption;
+  const rawAdoption = typeof record.adoption === "object" && record.adoption !== null ? (record.adoption as Record<string, unknown>) : {};
+  for (const id of Object.keys(adoption) as SectorId[]) {
+    const value = rawAdoption[id];
+    adoption[id] = typeof value === "number" && Number.isFinite(value) ? clampNum(value, 0, FIRM_AI[id].ceiling) : 0;
+  }
+  const gap = record.youthGap;
+  return { adoption, youthGap: typeof gap === "number" && Number.isFinite(gap) && gap > 0 ? gap : 0 };
+}
+
+function clampNum(n: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, n));
+}
+
+/** How capable and cheap AI is for firms. Slow at first, half way by year 10, near full by 20. */
+export function aiMaturity(year: number): number {
+  return 1 / (1 + Math.exp(-(year - 10) / 3.5));
+}
+
+/**
+ * One year of firms handing work to AI on their own. Tight labor and high wages push them faster;
+ * a slack market slows them. Sharing the profit, or the levy, slows them too.
+ */
+export function nextAdoption(
+  adoption: Record<SectorId, number>,
+  year: number,
+  policies: Pick<Policies, "ownership" | "aiLevy">,
+  prevUnemployment: number,
+): Record<SectorId, number> {
+  const next = blankAdoption();
+  const owner = OWNER_AI_PACE[asOwnership(policies.ownership)];
+  const levy = policies.aiLevy ? LEVY_PACE : 1;
+  const u = Number.isFinite(prevUnemployment) ? prevUnemployment : 0.06;
+  const labor = 1 + clampNum((0.06 - u) * 5, -0.35, 0.25);
+  const pace = aiMaturity(year) * owner * levy * labor;
+  for (const id of Object.keys(next) as SectorId[]) {
+    const { ceiling, speed } = FIRM_AI[id];
+    const share = clampNum(adoption[id] ?? 0, 0, ceiling);
+    if (ceiling <= 0) continue;
+    const room = 1 - share / ceiling;
+    next[id] = clampNum(share + speed * pace * room, 0, ceiling);
+  }
+  return next;
+}
+
+/** Public jobs wanted this year for a given number of displaced workers. */
+export function publicHires(mode: PublicHiring, displaced: number, pop: number): number {
+  if (mode === "off") return 0;
+  const rule = PUBLIC_HIRING[mode];
+  const scale = Math.max(0.2, pop / BASE_POP);
+  const cap = rule.cap * BASE_POP * PARTICIPATION * scale;
+  return Math.round(Math.min(cap, Math.max(rule.floor * scale, Math.max(0, displaced) * rule.share)));
+}
+
+export type JobsGap = { expected: number; actual: number; gap: number; elasticity: number };
+
+/**
+ * Jobs the city "should" have given how much its real output grew, Okun-style.
+ * The elasticity is measured on early years before AI took a real share of output; with too little
+ * of that history it defaults to 1, since the game has no other source of productivity growth.
+ * Capped at full employment: growth cannot promise more jobs than there are people looking.
+ */
+export function jobsGapSeries(history: readonly YearMark[]): (JobsGap & { year: number })[] {
+  const marks = history.filter((mark) => typeof mark.output === "number" && (mark.output ?? 0) > 0);
+  if (marks.length === 0) return [];
+  const anchor = marks[0]!;
+  const y0 = anchor.output!;
+  const e0 = Math.max(1, anchor.employed);
+  let elasticity = OKUN_ELASTICITY;
+  const early = marks.filter((mark) => (mark.aiJobs ?? 0) < mark.employed * 0.01 && mark.year > anchor.year);
+  const sample = early.filter((mark) => Math.abs(Math.log(mark.output! / y0)) > 0.02);
+  if (sample.length >= 3) {
+    let num = 0;
+    let den = 0;
+    for (const mark of sample) {
+      const ly = Math.log(mark.output! / y0);
+      num += ly * Math.log(Math.max(1, mark.employed) / e0);
+      den += ly * ly;
+    }
+    if (den > 0) elasticity = clampNum(num / den, 0.6, 1.2);
+  }
+  return marks.map((mark) => {
+    const looking = mark.laborForce ?? Math.round(mark.population * PARTICIPATION);
+    const raw = e0 * Math.pow(mark.output! / y0, elasticity);
+    const expected = Math.round(Math.min(raw, looking * 0.97));
+    return { year: mark.year, expected, actual: mark.employed, gap: expected - mark.employed, elasticity };
+  });
+}
+
+/** Latest missing-jobs gap, or null when there is no output history yet. */
+export function jobsGap(history: readonly YearMark[]): JobsGap | null {
+  const series = jobsGapSeries(history);
+  return series.length > 0 ? series[series.length - 1]! : null;
+}
 
 export type AgeId = "children" | "teens" | "adults" | "seniors";
 
@@ -555,6 +774,10 @@ export type Ledger = {
   works: Works;
   /** Power plant mix, energy research, and the oil price. */
   energy: EnergyState;
+  /** AI that firms adopt on their own, and the young people it shuts out. */
+  ai: AiState;
+  /** This year's AI and labor detail: youth jobless, frozen hiring, public jobs, downshift. */
+  jobs: JobsView;
   /** 100 at the opening census. Cumulative price level. */
   priceIndex: number;
   /** Yearly inflation rate, e.g. 0.02 for 2%. */
@@ -619,7 +842,7 @@ export const SECTORS: readonly SectorDef[] = [
     id: "transport",
     name: "Transportation",
     detail: "Public transit, private carriers, and logistics.",
-    baseSlots: 5200,
+    baseSlots: 4800,
     baseWage: 46_200,
     exposure: 0.8,
     tech: "transport",
@@ -628,7 +851,7 @@ export const SECTORS: readonly SectorDef[] = [
     id: "food",
     name: "Food chain",
     detail: "Agriculture, food factories, and grocery stores.",
-    baseSlots: 6400,
+    baseSlots: 6000,
     baseWage: 31_200,
     exposure: 0.48,
     tech: "food",
@@ -646,7 +869,7 @@ export const SECTORS: readonly SectorDef[] = [
     id: "services",
     name: "Services",
     detail: "Shops, repairs, and private services.",
-    baseSlots: 7800,
+    baseSlots: 5000,
     baseWage: 36_400,
     exposure: 0.4,
     tech: "services",
@@ -655,7 +878,7 @@ export const SECTORS: readonly SectorDef[] = [
     id: "government",
     name: "Government",
     detail: "Permits, the tax desk, and city administration.",
-    baseSlots: 3600,
+    baseSlots: 3200,
     baseWage: 44_600,
     exposure: 0.35,
     tech: "government",
@@ -686,6 +909,15 @@ export const SECTORS: readonly SectorDef[] = [
     baseWage: 41_000,
     exposure: 0.18,
     tech: "law",
+  },
+  {
+    id: "office",
+    name: "Office work",
+    detail: "Professional and business services, finance, and tech. The desk jobs.",
+    baseSlots: 3800,
+    baseWage: 52_000,
+    exposure: 0.62,
+    tech: "office",
   },
 ];
 
@@ -749,6 +981,12 @@ export const TECHS: readonly {
     sectorId: "law",
     detail: "Paperwork is automated. Patrols stay. The smallest job loss, and a little more capacity on the street.",
   },
+  {
+    id: "office",
+    name: "Office models",
+    sectorId: "office",
+    detail: "AI drafts, codes, books, and answers. Firms stop replacing the people who leave, and the newest hires are the first not taken on.",
+  },
 ];
 
 export const CHARTERS: readonly {
@@ -782,6 +1020,8 @@ const NEUTRAL: Policies = {
   retrain: false,
   wageFloor: false,
   ownership: "firms",
+  publicHiring: "off",
+  aiLevy: false,
 };
 
 const OPEN_EMPLOYED = SECTORS.reduce((sum, sector) => sum + sector.baseSlots, 0);
@@ -805,6 +1045,7 @@ function emptySpend(): SpendParts {
     construction: 0,
     principal: 0,
     research: 0,
+    publicJobs: 0,
   };
 }
 
@@ -858,6 +1099,7 @@ const JOB_ELASTICITY: Record<SectorId, number> = {
   health: 1.04,
   education: 1.02,
   law: 0.88,
+  office: 1,
 };
 
 function peopleScale(pop: number, elasticity: number): number {
@@ -897,6 +1139,7 @@ function flatSlots(): Record<SectorId, number> {
     health: 1,
     education: 1,
     law: 1,
+    office: 1,
   };
 }
 
@@ -932,6 +1175,7 @@ function yearForces(year: number): YearForces {
       health: clamp(1 + wave(year, 1.8) * 0.02, 0.96, 1.05),
       education: clamp(1 + wave(year, 2.8) * 0.015, 0.97, 1.04),
       law: clamp(1 + wave(year, 4.1) * 0.02, 0.96, 1.04),
+      office: clamp(1 + wave(year, 10.3) * 0.03, 0.95, 1.05),
     },
     participation: entry * 0.011,
     friction: clamp(0.034 + quits * 0.012, 0.028, 0.05),
@@ -954,6 +1198,7 @@ export function programCosts(pop: number, unemployed: number): SpendParts {
     construction: 0,
     principal: 0,
     research: 0,
+    publicJobs: 0,
   };
 }
 
@@ -983,10 +1228,38 @@ type Project = {
   profit: number;
   realWage: number;
   transition: Transition;
+  jobs: JobsView;
+  youthGap: number;
 };
 
-function displacedShare(sector: SectorDef, techs: Record<TechId, TechState>): number {
-  return intensityOf(sector, techs);
+/** Share of a sector's work done by machines: the player's automation or firms' own AI, whichever is further along. */
+function displacedShare(
+  sector: SectorDef,
+  techs: Record<TechId, TechState>,
+  adoption?: Record<SectorId, number> | null,
+): number {
+  return Math.max(intensityOf(sector, techs), adoption?.[sector.id] ?? 0);
+}
+
+/** Goods per machine in a sector: the player's rebuilt lines make ten workers' worth, firms' drop-in AI about two. */
+function machineOutput(
+  sector: SectorDef,
+  techs: Record<TechId, TechState>,
+  adoption?: Record<SectorId, number> | null,
+): number {
+  const gone = displacedShare(sector, techs, adoption);
+  if (gone <= 0) return AUTOMATON_OUTPUT;
+  const firm = firmOnlyShare(sector, techs, adoption) / gone;
+  return firm * FIRM_AI_OUTPUT + (1 - firm) * AUTOMATON_OUTPUT;
+}
+
+/** Share of a sector's jobs firms took on their own, beyond what the player automated. */
+function firmOnlyShare(
+  sector: SectorDef,
+  techs: Record<TechId, TechState>,
+  adoption?: Record<SectorId, number> | null,
+): number {
+  return Math.max(0, (adoption?.[sector.id] ?? 0) - intensityOf(sector, techs));
 }
 
 /** Share of displaced workers who have a new job. Grows over several years, only if retraining is on. */
@@ -1006,15 +1279,15 @@ function absorption(techs: Record<TechId, TechState>, policies: Policies): numbe
 }
 
 /** 1.00 is the census. Machines make goods abundant; this is a disinflationary force, not the CPI. */
-export function priceRatio(techs: Record<TechId, TechState>): number {
+export function priceRatio(techs: Record<TechId, TechState>, adoption?: Record<SectorId, number> | null): number {
   let base = 0;
   let output = 0;
   for (const sector of SECTORS) {
-    const gone = displacedShare(sector, techs);
+    const gone = displacedShare(sector, techs, adoption);
     const humans = sector.baseSlots * (1 - gone);
     const machines = gone > 0 && gone < 0.98 ? sector.baseSlots * gone : 0;
     base += sector.baseSlots;
-    output += humans + machines * AUTOMATON_OUTPUT;
+    output += humans + machines * machineOutput(sector, techs, adoption);
   }
   if (base <= 0) return 1;
   return clamp(1 / Math.pow(output / base, 0.35), 0.55, 1.08);
@@ -1099,6 +1372,16 @@ function stagedMachines(state: Pick<Ledger, "techs">): number {
   return extra;
 }
 
+type Demand = {
+  slots: number[];
+  /** Public jobs added to each sector by the public hiring lever. */
+  sponge: number[];
+  displaced: number;
+  officeDisplaced: number;
+  downshift: number;
+  absorb: number;
+};
+
 function desiredSlots(
   pop: number,
   policies: Policies,
@@ -1107,22 +1390,29 @@ function desiredSlots(
   climate?: number,
   works?: Works,
   energy?: EnergyState | null,
-): number[] {
+  adoption?: Record<SectorId, number> | null,
+): Demand {
   const forces = yearForces(year);
-  const cheap = clamp(1 - priceRatio(techs), 0, 0.45);
+  const cheap = clamp(1 - priceRatio(techs, adoption), 0, 0.45);
   const absorb = absorption(techs, policies);
   let displacedJobs = 0;
   let machineTotal = 0;
+  let officeDisplaced = 0;
   const ownMachines = SECTORS.map((sector) => {
     const scale = peopleScale(pop, JOB_ELASTICITY[sector.id]);
-    const gone = displacedShare(sector, techs);
+    const gone = displacedShare(sector, techs, adoption);
     const machines = sector.baseSlots * scale * gone;
     displacedJobs += sector.baseSlots * scale * gone;
+    if (sector.id === "office") officeDisplaced = sector.baseSlots * scale * gone;
     machineTotal += machines;
     return machines;
   });
-  return SECTORS.map((sector, index) => {
-    const gone = displacedShare(sector, techs);
+  // Displaced desk workers go after shop and service jobs; some get them.
+  const downshift = officeDisplaced * DOWNSHIFT_SHARE * (1 - absorb);
+  const hires = publicHires(asPublicHiring(policies.publicHiring), displacedJobs, pop);
+  const sponge = SECTORS.map((sector) => hires * (PUBLIC_SPLIT[sector.id] ?? 0));
+  const slots = SECTORS.map((sector, index) => {
+    const gone = displacedShare(sector, techs, adoption);
     let slots = sector.baseSlots * peopleScale(pop, JOB_ELASTICITY[sector.id]) * forces.slot[sector.id];
     slots *= 1 - gone;
     if (policies.tax === "high") slots *= 0.98;
@@ -1148,7 +1438,9 @@ function desiredSlots(
     if (sector.id === "education" && policies.works) slots += 300 * people;
     if (sector.id === "government" && policies.retrain) slots += 420 * people;
     slots += (ownMachines[index] ?? 0) * 0.02;
-    if (sector.id === "services") slots += machineTotal * 0.05;
+    if (sector.id === "services") slots += machineTotal * 0.05 + downshift * 0.5;
+    if (policies.aiLevy && PRIVATE_SECTORS.has(sector.id)) slots *= 0.99;
+    slots += sponge[index] ?? 0;
     if (
       absorb > 0 &&
       (sector.id === "services" || sector.id === "health" || sector.id === "education")
@@ -1165,6 +1457,7 @@ function desiredSlots(
     }
     return Math.max(0, slots * (climate ?? 1));
   });
+  return { slots, sponge, displaced: displacedJobs, officeDisplaced, downshift, absorb };
 }
 
 function sumOf(values: readonly number[]): number {
@@ -1214,6 +1507,10 @@ function project(args: {
   treasury?: number;
   /** Opening census: keep prices at 100 and inflation at the target. */
   freezePrices?: boolean;
+  /** Firms' own AI this year, and last year's, for frozen hiring. */
+  adoption?: Record<SectorId, number> | null;
+  prevAdoption?: Record<SectorId, number> | null;
+  prevYouthGap?: number;
 }): Project {
   const forces = yearForces(args.year);
   let participation = PARTICIPATION + forces.participation;
@@ -1227,14 +1524,24 @@ function project(args: {
   if (args.policies.stipend && (priorU ?? 0) > 0.08) participation += 0.004;
   if (args.policies.gates === "open") participation += 0.004;
   if (args.policies.gates === "tight") participation -= 0.006;
-  const shock = priceRatio(args.techs);
+  const shock = priceRatio(args.techs, args.adoption);
   if (shock < 0.97) participation -= (0.97 - shock) * 0.03;
   if (args.policies.retrain && shock < 0.98) participation += 0.006;
   participation = clamp(participation, 0.55, 0.68);
 
   const ages = cityAges(args.pop, participation);
   const laborForce = Math.max(1, lookingCount(ages));
-  const wantedRaw = desiredSlots(args.pop, args.policies, args.techs, args.year, args.climate, args.works, args.energy);
+  const demand = desiredSlots(
+    args.pop,
+    args.policies,
+    args.techs,
+    args.year,
+    args.climate,
+    args.works,
+    args.energy,
+    args.adoption,
+  );
+  const wantedRaw = demand.slots;
   const wanted = Math.round(sumOf(wantedRaw));
   const fillCap = Math.max(0, Math.round(laborForce * (1 - forces.friction)));
   const structuralTotal = Math.min(wanted, fillCap, laborForce);
@@ -1258,13 +1565,18 @@ function project(args: {
   if (args.policies.wageFloor) factor = Math.max(factor, OPEN_WAGE_FACTOR * 1.08);
   const relative = factor / OPEN_WAGE_FACTOR;
 
+  // Overqualified desk workers crowd into shops and services and push that pay down.
+  const servicesIndex = SECTORS.findIndex((sector) => sector.id === "services");
+  const servicesSlots = Math.max(1, wantedRaw[servicesIndex] ?? 1);
+  const downPay = 1 - clamp((demand.downshift / servicesSlots) * 0.5, 0, 0.18);
   const sectors: SectorSnap[] = SECTORS.map((sector, index) => {
-    const gone = displacedShare(sector, args.techs);
+    const gone = displacedShare(sector, args.techs, args.adoption);
     const humans = employedCounts[index] ?? 0;
     const automatons = gone <= 0 || gone >= 0.98 ? 0 : Math.round((humans * gone) / (1 - gone));
-    const premium = 1 + gone * 0.28;
+    const premium = 1 + intensityOf(sector, args.techs) * 0.28;
+    const squeeze = sector.id === "services" ? downPay : 1;
     const wage =
-      Math.round((sector.baseWage * relative * premium * forces.pay * (args.wageScale ?? 1)) / 100) * 100;
+      Math.round((sector.baseWage * relative * premium * squeeze * forces.pay * (args.wageScale ?? 1)) / 100) * 100;
     const prev = args.prevEmployed?.get(sector.id);
     return {
       id: sector.id,
@@ -1276,10 +1588,17 @@ function project(args: {
   });
 
   const wageBill0 = sectors.reduce((sum, sector) => sum + sector.employed * sector.wage, 0);
-  const goodsRatio = priceRatio(args.techs);
+  const goodsRatio = priceRatio(args.techs, args.adoption);
+  const spongeFilled = SECTORS.map((_, index) => {
+    const want = wantedRaw[index] ?? 0;
+    const sponge = demand.sponge[index] ?? 0;
+    if (sponge <= 0 || want <= 0) return 0;
+    return sponge * Math.min(1, (employedCounts[index] ?? 0) / want);
+  });
+  const publicJobs = Math.round(sumOf(spongeFilled));
   const automatons = sectors.reduce((sum, sector) => sum + sector.automatons, 0);
   const outputUnits = sectors.reduce(
-    (sum, sector) => sum + sector.employed + sector.automatons * AUTOMATON_OUTPUT,
+    (sum, sector, index) => sum + sector.employed + sector.automatons * machineOutput(SECTORS[index]!, args.techs, args.adoption),
     0,
   );
   const prevPrice = args.priceLevel ?? PRICE_CENSUS;
@@ -1308,7 +1627,8 @@ function project(args: {
     }
     const band = args.policies.tax === "high" ? 1.12 : args.policies.tax === "low" ? 0.88 : 1;
     const ownership = asOwnership(args.policies.ownership);
-    const profitTax = Math.round(profit * PROFIT_TAKE[ownership] * band);
+    const levy = args.policies.aiLevy ? LEVY_TAKE : 0;
+    const profitTax = Math.round(profit * (PROFIT_TAKE[ownership] + levy) * band);
     const taxRevenue = Math.round(humanBase * TAX_RATES[args.policies.tax]) + profitTax;
     const unemployed = Math.max(0, laborForce - employed);
     const cola = priceIndex / PRICE_CENSUS;
@@ -1316,7 +1636,8 @@ function project(args: {
     let dividend = args.policies.dividend ? Math.round(costs.dividend * cola) : 0;
     if (ownership === "citizens") dividend += Math.round(profit * CITIZEN_PAYOUT);
     const spend: SpendParts = {
-      standing: Math.round(costs.standing * cola),
+      // Standing services are mostly public pay, so they rise with wages rather than with every price.
+      standing: Math.round(costs.standing * Math.max(wageScale, 0.2)),
       stipend: args.policies.stipend ? Math.round(costs.stipend * cola) : 0,
       dividend,
       works: args.policies.works ? Math.round(costs.works * cola) : 0,
@@ -1326,6 +1647,9 @@ function project(args: {
       construction: Math.round(args.serviceSpend.construction * cola),
       principal: args.serviceSpend.principal,
       research: Math.round((args.serviceSpend.research ?? 0) * cola),
+      publicJobs: Math.round(
+        wageSectors.reduce((sum, sector, index) => sum + (spongeFilled[index] ?? 0) * sector.wage, 0) * PUBLIC_JOB_OVERHEAD,
+      ),
     };
     const spending = spendTotal(spend);
     return { avgWage, profit, taxRevenue, spend, spending };
@@ -1349,7 +1673,7 @@ function project(args: {
       unemployment,
       covers,
       goodsRatio,
-      prevGoodsRatio: priceRatio(args.prevTechs ?? args.techs),
+      prevGoodsRatio: priceRatio(args.prevTechs ?? args.techs, args.prevAdoption ?? args.adoption),
       gdp: wageBill0 + first.profit,
       deficit: first.spending - first.taxRevenue,
       transfers: first.spend.stipend + first.spend.dividend + first.spend.works,
@@ -1366,7 +1690,53 @@ function project(args: {
     priced = booksFor(pricedSectors, wageScale, priceIndex);
   }
 
+  // Firms stop refilling the jobs AI now does. Most of those openings would have gone to young entrants.
+  const scaleNow = (sector: SectorDef) => sector.baseSlots * peopleScale(args.pop, JOB_ELASTICITY[sector.id]);
+  let frozen = 0;
+  let aiJobs = 0;
+  for (const sector of SECTORS) {
+    const now = firmOnlyShare(sector, args.techs, args.adoption);
+    const before = Math.max(0, (args.prevAdoption?.[sector.id] ?? args.adoption?.[sector.id] ?? 0) - intensityOf(sector, args.techs));
+    aiJobs += scaleNow(sector) * now;
+    frozen += scaleNow(sector) * Math.max(0, now - before);
+  }
+  const youthLooking = ages.looking.teens + Math.round(ages.looking.adults * YOUNG_ADULT_SHARE);
+  const youthGap = Math.min(
+    youthLooking * 0.6,
+    Math.max(0, (args.prevYouthGap ?? 0) * YOUTH_GAP_FADE + frozen * ENTRY_SHARE),
+  );
+  const youthBase = youthLooking * clamp(unemployment * 1.8 + 0.015, 0, 0.9);
+  const youthUnemployed = Math.round(Math.min(unemployed, youthLooking * 0.95, youthBase + youthGap));
+  const officeShare = demand.displaced > 0 ? demand.officeDisplaced / demand.displaced : 0;
+  const officeJobless = Math.round(
+    clamp(
+      demand.officeDisplaced * (1 - demand.absorb) - demand.downshift * 0.5 - publicJobs * officeShare,
+      0,
+      unemployed * 0.5,
+    ),
+  );
+  const output = Math.round(
+    sectors.reduce((sum, sector, index) => {
+      const def = SECTORS[index]!;
+      const each = Math.min(AI_GDP_WEIGHT, machineOutput(def, args.techs, args.adoption));
+      return sum + (sector.employed + sector.automatons * each) * def.baseWage;
+    }, 0),
+  );
+  const jobs: JobsView = {
+    youthLooking,
+    youthUnemployed,
+    youthUnemployment: youthLooking > 0 ? youthUnemployed / youthLooking : 0,
+    aiJobs: Math.round(aiJobs),
+    frozen: Math.round(frozen),
+    publicJobs,
+    downshift: Math.round(demand.downshift),
+    officeJobless,
+    output,
+  };
+
   return {
+    jobs,
+    youthGap,
     sectors: pricedSectors,
     employed,
     laborForce,
@@ -1409,7 +1779,10 @@ function blendEmployment(
     return scaleTo(blended, employedTarget);
   }
   if (speed > 1) return scaleTo(rawSlots, employedTarget);
-  return scaleTo(prev, employedTarget);
+  // Total moves against demand (more people hired from a growing labor force while demand dips):
+  // still drift the mix halfway toward demand so new plant crews and frozen sectors show up.
+  const halfway = rawSlots.map((slots, index) => prev[index]! + (slots - prev[index]!) * 0.5);
+  return scaleTo(halfway, employedTarget);
 }
 
 function openingBulletin(charter: CharterId, census: Project): string {
@@ -1463,6 +1836,8 @@ export function openingState(charter: CharterId = "census"): Ledger {
     techs: techsFor(charter),
     works: openingWorksState,
     energy: openingEnergy,
+    ai: freshAi(),
+    jobs: census.jobs,
     priceIndex: census.priceIndex,
     inflation: INFLATION_TARGET,
     wageScale: 1,
@@ -1527,6 +1902,7 @@ const SECTOR_SHORT: Record<SectorId, string> = {
   health: "Health",
   education: "Education",
   law: "Law enforcement",
+  office: "Office",
 };
 
 function blankTechFlags(): Record<TechId, boolean> {
@@ -1576,6 +1952,10 @@ export function snapshot(state: Ledger): YearMark {
     realWage: state.realWage,
     inflation: state.inflation,
     oilPrice: state.energy?.oilPrice ?? 1,
+    output: state.jobs?.output,
+    youthUnemployment: state.jobs?.youthUnemployment,
+    aiJobs: state.jobs?.aiJobs ?? 0,
+    publicJobs: state.jobs?.publicJobs ?? 0,
     powerCost: bill.power,
     waterCost: bill.water,
     wasteCost: bill.waste,
@@ -1584,20 +1964,70 @@ export function snapshot(state: Ledger): YearMark {
 
 type TrailInput = Omit<
   Ledger,
-  "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale" | "energy"
+  "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale" | "energy" | "ai" | "jobs"
 > &
   Partial<
     Pick<
       Ledger,
-      "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale" | "energy"
+      "history" | "events" | "enacted" | "enactedTech" | "shadow" | "pace" | "ages" | "works" | "loans" | "debt" | "crime" | "protest" | "covers" | "inflation" | "wageScale" | "energy" | "ai" | "jobs"
     >
   >;
+
+/** Policies from any save: missing or damaged new levers fall back to off. */
+export function cleanPolicies(raw: Policies): Policies {
+  return {
+    ...raw,
+    ownership: asOwnership(raw.ownership),
+    publicHiring: asPublicHiring(raw.publicHiring),
+    aiLevy: raw.aiLevy === true,
+  };
+}
+
+/** Labor detail for a city saved before AI adoption existed: youth from the usual ratio, nothing frozen. */
+function asJobs(raw: Partial<JobsView> | undefined, state: Pick<Ledger, "unemployment" | "laborForce" | "employed" | "sectors"> & { ages?: Ages }): JobsView {
+  const num = (value: unknown, fallback: number) =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
+  const u = Number.isFinite(state.unemployment) ? state.unemployment : 0;
+  const looking = state.ages?.looking;
+  const youthLooking = looking
+    ? looking.teens + Math.round(looking.adults * YOUNG_ADULT_SHARE)
+    : Math.round((state.laborForce || 0) * 0.15);
+  const unemployed = Math.max(0, (state.laborForce || 0) - (state.employed || 0));
+  const youthUnemployed = Math.round(Math.min(unemployed, youthLooking * clamp(u * 1.8 + 0.015, 0, 0.9)));
+  const output = (state.sectors ?? []).reduce((sum, sector) => {
+    const def = SECTORS.find((item) => item.id === sector.id);
+    return sum + ((sector.employed || 0) + (sector.automatons || 0) * AI_GDP_WEIGHT) * (def?.baseWage ?? 40_000);
+  }, 0);
+  const base: JobsView = {
+    youthLooking,
+    youthUnemployed,
+    youthUnemployment: youthLooking > 0 ? youthUnemployed / youthLooking : 0,
+    aiJobs: 0,
+    frozen: 0,
+    publicJobs: 0,
+    downshift: 0,
+    officeJobless: 0,
+    output: Math.round(output),
+  };
+  if (!raw || typeof raw !== "object") return base;
+  return {
+    youthLooking: num(raw.youthLooking, base.youthLooking),
+    youthUnemployed: num(raw.youthUnemployed, base.youthUnemployed),
+    youthUnemployment: clamp(num(raw.youthUnemployment, base.youthUnemployment), 0, 1),
+    aiJobs: num(raw.aiJobs, 0),
+    frozen: num(raw.frozen, 0),
+    publicJobs: num(raw.publicJobs, 0),
+    downshift: num(raw.downshift, 0),
+    officeJobless: num(raw.officeJobless, 0),
+    output: num(raw.output, base.output),
+  };
+}
 
 /** Fill the trend trail for a city saved before charts existed. */
 export function ensureTrail(state: TrailInput): Ledger {
   const enactedRaw = state.enacted ?? (state.hasClosedYear ? state.policies : { ...NEUTRAL });
-  const policies = { ...state.policies, ownership: asOwnership(state.policies.ownership) };
-  const enacted = { ...enactedRaw, ownership: asOwnership(enactedRaw.ownership ?? policies.ownership) };
+  const policies = cleanPolicies(state.policies);
+  const enacted = cleanPolicies({ ...enactedRaw, ownership: enactedRaw.ownership ?? policies.ownership });
   const enactedTech =
     state.enactedTech ?? (state.hasClosedYear ? enactedTechMap(state.techs) : blankTechFlags());
   const ages =
@@ -1644,6 +2074,8 @@ export function ensureTrail(state: TrailInput): Ledger {
     ages,
     works,
     energy,
+    ai: asAi(state.ai),
+    jobs: asJobs(state.jobs, state),
     loans,
     debt,
     crime: state.crime ?? crimeIndex(state.unemployment, worstCover(covers), state.policies.stipend || state.policies.dividend),
@@ -1653,7 +2085,9 @@ export function ensureTrail(state: TrailInput): Ledger {
     shadow: state.shadow
       ? {
           ...state.shadow,
-          policies: { ...state.shadow.policies, ownership: asOwnership(state.shadow.policies.ownership) },
+          policies: cleanPolicies(state.shadow.policies),
+          ai: asAi(state.shadow.ai),
+          jobs: asJobs(state.shadow.jobs, state.shadow),
           loans: shadowLoans,
           debt: debtOf(shadowLoans),
           inflation: state.shadow.inflation ?? INFLATION_TARGET,
@@ -1696,12 +2130,17 @@ function statuteLabels(state: Ledger, nextTechs: Record<TechId, TechState>): str
     const who = next.ownership === "city" ? "the city" : next.ownership === "citizens" ? "residents" : "firms";
     labels.push(`Machine profits to ${who}`);
   }
+  if (asPublicHiring(prev.publicHiring) !== asPublicHiring(next.publicHiring)) {
+    const mode = asPublicHiring(next.publicHiring);
+    labels.push(mode === "off" ? "Public hiring ended" : mode === "big" ? "Big public hiring began" : "Public hiring began");
+  }
   const toggles: readonly [keyof Policies, string][] = [
     ["stipend", "Jobless stipend"],
     ["dividend", "Citizen dividend"],
     ["works", "Public works"],
     ["retrain", "Retraining"],
     ["wageFloor", "Wage floor"],
+    ["aiLevy", "AI levy"],
   ];
   for (const [key, name] of toggles) {
     if (Boolean(prev[key]) === Boolean(next[key])) continue;
@@ -1902,7 +2341,8 @@ function spendTotal(spend: SpendParts): number {
     spend.interest +
     spend.principal +
     spend.construction +
-    (spend.research ?? 0)
+    (spend.research ?? 0) +
+    (spend.publicJobs ?? 0)
   );
 }
 
@@ -1916,6 +2356,7 @@ function trimDiscretionary(spend: SpendParts, need: number): { spend: SpendParts
     { key: "construction", label: "Plant construction halted" },
     { key: "dividend", label: "Dividend suspended" },
     { key: "works", label: "Public works suspended" },
+    { key: "publicJobs", label: "Public hiring frozen" },
     { key: "stipend", label: "Stipend suspended" },
     { key: "retrain", label: "Retraining suspended" },
   ];
@@ -1972,6 +2413,8 @@ function settle(
   const protest = willProtest(covers, state.unemployment, state.stability, needsMet);
   const gentle = !deepening && statuteLabels(state, techs).length === 0 && !protest && worstCover(covers) >= 0.95;
   const prevEmployed = new Map(state.sectors.map((sector) => [sector.id, sector.employed]));
+  const ai0 = asAi(state.ai);
+  const adoption = nextAdoption(ai0.adoption, state.year + 1, policies, state.unemployment);
   const econ = project({
     pop: population,
     policies,
@@ -1997,6 +2440,9 @@ function settle(
     prevTechs: state.techs,
     covers,
     treasury: state.treasury,
+    adoption,
+    prevAdoption: ai0.adoption,
+    prevYouthGap: ai0.youthGap,
   });
   let withCrews = econ;
   let treasury = state.treasury + withCrews.taxRevenue - withCrews.spending;
@@ -2069,6 +2515,8 @@ function settle(
     techs,
     works: clearStaged(finalWorks),
     energy: finalEnergy,
+    ai: { adoption, youthGap: withCrews.youthGap },
+    jobs: withCrews.jobs,
     priceIndex: withCrews.priceIndex,
     inflation: withCrews.inflation,
     wageScale: withCrews.wageScale,
@@ -2272,10 +2720,41 @@ function writeBulletin(
   }
   const loanLine = sentences.find((line) => line.includes("taken to cover")) ?? "";
   const priceLine = sentences.find((line) => line.startsWith("Prices")) ?? "";
-  const picked = [...cityLines, lead, jobless, priceLine, money, loanLine, stable].filter(
+  const jobsNow = next.jobs;
+  let aiLine = "";
+  if (jobsNow && jobsNow.frozen >= 40) {
+    aiLine = `Firms left ${formatInt(jobsNow.frozen)} openings unfilled as AI took the work.`;
+    if (jobsNow.youthUnemployment >= 0.2) {
+      aiLine = `${aiLine.slice(0, -1)}; ${formatPct(jobsNow.youthUnemployment)} of young people looking have no job.`;
+    }
+  }
+  let gapLine = "";
+  if (jobsNow) {
+    const gap = jobsGap([
+      ...prev.history,
+      {
+        year: prev.year + 1,
+        unemployment: next.unemployment,
+        avgWage: next.avgWage,
+        taxRevenue: next.taxRevenue,
+        spending: next.spending,
+        stability: next.stability,
+        population: prev.population,
+        treasury: next.treasury,
+        employed: next.employed,
+        laborForce: next.laborForce,
+        output: jobsNow.output,
+        aiJobs: jobsNow.aiJobs,
+      },
+    ]);
+    if (gap && gap.gap >= next.laborForce * 0.03) {
+      gapLine = `Output growth says the city should have ${formatInt(gap.gap)} more jobs than it does.`;
+    }
+  }
+  const picked = [...cityLines, lead, jobless, aiLine, priceLine, money, loanLine, gapLine, stable].filter(
     (line, index, all) => line && all.indexOf(line) === index,
   );
-  return picked.slice(0, 5).join(" ");
+  return picked.slice(0, 6).join(" ");
 }
 
 function nextStability(
@@ -2300,12 +2779,21 @@ function nextStability(
   // Cheaper goods help people who can still buy them. Without a stipend,
   // dividend, or resident ownership, the unemployed do not get that bonus.
   const priceGain = clamp(Math.max(0, 1 - price) * 26, 0, 11);
-  if (needs) delta += priceGain;
+  // A stipend pays the bills, not for a reason to get up. With many people idle, cheap goods count for less.
+  if (needs) delta += priceGain * (1 - clamp((u - 0.1) * 1.5, 0, 0.25));
   else {
     delta += priceGain * clamp(1 - u, 0, 1);
     if (u > 0.08 && price < 0.98) delta -= (0.98 - price) * (u - 0.08) * 28;
   }
 
+  // Young people shut out of first jobs, and displaced desk workers, are loud and organized.
+  const jobs = econ.jobs;
+  if (jobs) {
+    const yu = jobs.youthUnemployment;
+    if (yu > 0.18) delta -= Math.min(needs ? 2.5 : 5, (yu - 0.18) * (needs ? 6 : 14));
+    const desk = jobs.officeJobless / Math.max(1, econ.laborForce);
+    delta -= Math.min(needs ? 1.5 : 3.5, desk * (needs ? 24 : 45));
+  }
   if (prev.policies.stipend) delta += 4.2 + (u > 0.08 ? Math.min(3.2, (u - 0.08) * 24) : 0);
   if (prev.policies.dividend) delta += 3.6;
   if (prev.policies.ownership === "citizens" && econ.profit > 0) delta += 2.4;
@@ -2386,12 +2874,15 @@ export function techStatus(tech: TechState): "off" | "staged" | "live" {
 export function automationLabel(
   sectorId: SectorId,
   techs: Record<TechId, TechState>,
+  adoption?: Record<SectorId, number> | null,
 ): string {
   const sector = sectorDef(sectorId);
   const tech = techs[sector.tech];
   const status = techStatus(tech);
-  if (status === "off") return "No automation";
-  if (status === "staged") return "Staged for next year";
+  const firm = firmOnlyShare(sector, techs, adoption);
+  const firmText = `Firms' own AI does ${formatPct(firm)} of the work`;
+  if (status === "off") return firm >= 0.005 ? firmText : FIRM_AI[sectorId].ceiling > 0 ? "No AI yet" : "No automation";
+  if (status === "staged") return firm >= 0.005 ? `${firmText} · automation staged` : "Staged for next year";
   const share = intensityOf(sector, techs);
   if (share < 0.22) return `Automated · year ${tech.activeYears} · light`;
   if (share < 0.45) return `Automated · year ${tech.activeYears} · partial`;
