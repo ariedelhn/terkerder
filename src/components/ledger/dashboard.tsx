@@ -104,8 +104,11 @@ import {
 import { loadLedger, loadSaves, rememberCity, forgetSave, saveLedger, type CitySave } from "@/lib/sim/storage";
 import { Trends } from "@/components/ledger/trends";
 import { CityMap } from "@/components/ledger/city-map";
+import { Advisors, GameOverScreen, ProtestCutscene } from "@/components/ledger/story";
+import { isGameOver, protestDispatch, type ProtestDispatch } from "@/lib/sim/events";
 
 type Tab =
+  | "advisors"
   | "sectors"
   | "city"
   | "policy"
@@ -169,7 +172,13 @@ export function Dashboard() {
   const [pendingLoad, setPendingLoad] = useState<string | null>(null);
   const [simulating, setSimulating] = useState(false);
   const [ready, setReady] = useState(false);
+  const [dispatch, setDispatch] = useState<{ year: number; story: ProtestDispatch } | null>(null);
+  const [ruinsOpen, setRuinsOpen] = useState(false);
   const simTimer = useRef<number | null>(null);
+  const ledgerRef = useRef(ledger);
+  ledgerRef.current = ledger;
+  // The engine keeps running past 0 for tests and balance runs; the game stops here.
+  const fallen = isGameOver(ledger);
 
   useEffect(() => {
     const saved = loadLedger();
@@ -190,11 +199,16 @@ export function Dashboard() {
   }, []);
 
   function advanceYear() {
-    if (simulating) return;
+    if (simulating || isGameOver(ledgerRef.current)) return;
     setConfirming(false);
     setSimulating(true);
+    setDispatch(null);
     simTimer.current = window.setTimeout(() => {
-      setLedger((current) => advance(current));
+      const next = advance(ledgerRef.current);
+      setLedger(next);
+      setRuinsOpen(false);
+      const story = protestDispatch(next);
+      setDispatch(story ? { year: next.year, story } : null);
       setSimulating(false);
     }, 2000);
   }
@@ -368,6 +382,7 @@ export function Dashboard() {
               Load game
             </button>
             <div className="grid grid-cols-2 gap-2 pt-1">
+              <TabButton id="advisors" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="Advisors" />
               <TabButton id="sectors" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="Jobs" />
               <TabButton id="city" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="City" />
               <TabButton id="policy" current={tab} onSelect={(next) => { selectTab(next); setMenuOpen(false); }} label="Policy" />
@@ -494,6 +509,7 @@ export function Dashboard() {
             </section>
           </>
         ) : null}
+        {tab === "advisors" ? <Advisors ledger={ledger} /> : null}
         {tab === "people" ? <Ages ledger={ledger} /> : null}
         {tab === "charts" ? <Trends ledger={ledger} /> : null}
         {tab === "map" ? <CityMap ledger={ledger} /> : null}
@@ -539,12 +555,22 @@ export function Dashboard() {
             type="button"
             className="flex min-h-16 items-center justify-center gap-2 rounded-xl bg-accent px-5 text-accent-foreground"
             data-testid="advance"
-            disabled={simulating}
+            disabled={simulating || fallen}
             onClick={advanceYear}
           >
-            <span className="text-lg font-semibold">Advance year</span>
+            <span className="text-lg font-semibold">{fallen ? "The city has fallen" : "Advance year"}</span>
             <ArrowRight className="size-6" strokeWidth={1.75} aria-hidden="true" />
           </button>
+          {fallen && ruinsOpen ? (
+            <button
+              type="button"
+              className="min-h-12 rounded-xl border border-danger/50 text-base font-semibold text-danger"
+              data-testid="gameover-reopen"
+              onClick={() => setRuinsOpen(false)}
+            >
+              See the final tally
+            </button>
+          ) : null}
           {saveNote ? <p className="text-center text-sm text-muted-foreground">{saveNote}</p> : null}
         </div>
       </footer>
@@ -571,6 +597,8 @@ export function Dashboard() {
                   className="min-h-24 rounded-xl border border-border bg-card px-4 py-4 text-left"
                   onClick={() => {
                     setLedger(openingState(charter.id));
+                    setDispatch(null);
+                    setRuinsOpen(false);
                     setTab("figures");
                     setConfirming(false);
                   }}
@@ -606,6 +634,19 @@ export function Dashboard() {
             </p>
           </div>
         </div>
+      ) : null}
+
+      {dispatch && !simulating && !fallen ? (
+        <ProtestCutscene dispatch={dispatch.story} year={dispatch.year} onClose={() => setDispatch(null)} />
+      ) : null}
+
+      {fallen && ready && !ruinsOpen && !simulating && !confirming && !savesOpen ? (
+        <GameOverScreen
+          ledger={ledger}
+          onNewGame={() => setConfirming(true)}
+          onLoad={openSaves}
+          onInspect={() => setRuinsOpen(true)}
+        />
       ) : null}
 
       {namingSave ? (
@@ -716,6 +757,8 @@ export function Dashboard() {
                           className="min-h-14 rounded-xl bg-accent text-base font-semibold text-accent-foreground"
                           onClick={() => {
                             setLedger(slot.ledger);
+                            setDispatch(null);
+                            setRuinsOpen(false);
                             setTab("figures");
                             setPendingLoad(null);
                             setSavesOpen(false);
