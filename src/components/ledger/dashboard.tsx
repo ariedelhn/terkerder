@@ -161,7 +161,7 @@ const SECTOR_ICON: Record<SectorId, LucideIcon> = {
 
 export function Dashboard() {
   const [ledger, setLedger] = useState<Ledger>(() => openingState());
-  const [tab, setTab] = useState<Tab>("map");
+  const [tab, setTab] = useState<Tab>("advisors");
   const [confirming, setConfirming] = useState(false);
   const [savesOpen, setSavesOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
