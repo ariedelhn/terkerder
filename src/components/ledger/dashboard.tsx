@@ -1689,7 +1689,7 @@ function PolicyList({
       <div className="overflow-hidden rounded-xl border border-border bg-card">
         <ToggleRow
           title="AI levy"
-          detail={`Firms adopt AI on their own at half the pace, and pay ${Math.round(LEVY_TAKE * 100)}% more of machine profit in tax. Private hiring dips about 1%.`}
+          detail={`On from the start; switch off to opt out. Firms adopt AI on their own at half the pace, and pay ${Math.round(LEVY_TAKE * 100)}% more of machine profit in tax. Private hiring dips about 1%.`}
           on={ledger.policies.aiLevy}
           onToggle={() => onPolicy("aiLevy", !ledger.policies.aiLevy)}
           last
@@ -1845,13 +1845,19 @@ function AiFigures({ ledger }: { ledger: Ledger }) {
       }, 0),
     );
   const owner =
-    ledger.policies.ownership === "firms" ? "Firms keep the profit, so they adopt at full pace." : ledger.policies.ownership === "city" ? "The city takes much of the profit, so firms adopt a little slower." : "Residents share the profit, so firms adopt slower.";
+    ledger.policies.ownership === "firms"
+      ? ledger.policies.aiLevy
+        ? "Firms keep the profit."
+        : "Firms keep the profit, so they adopt at full pace."
+      : ledger.policies.ownership === "city"
+        ? "The city takes much of the profit, so firms adopt a little slower."
+        : "Residents share the profit, so firms adopt slower.";
   return (
     <section className="mt-4 rounded-xl border border-border bg-card px-4 py-4" aria-label="AI at work" data-testid="ai-figures">
       <h2 className="font-sans text-sm font-medium text-muted-foreground">AI at work</h2>
       <p className="mt-1 text-sm text-muted-foreground">
         Firms hand work to AI on their own, desk jobs first. Few people are fired: firms just stop replacing the people who leave, and stop hiring new graduates. {owner}
-        {ledger.policies.aiLevy ? " The AI levy halves their pace." : ""}
+        {ledger.policies.aiLevy ? " The AI levy halves their pace; switch it off under Policy to let them run." : ""}
       </p>
       <dl className="mt-3 flex flex-col gap-2 text-base">
         <div className="flex items-baseline justify-between gap-3">

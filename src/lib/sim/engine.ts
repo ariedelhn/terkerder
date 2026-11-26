@@ -1081,17 +1081,17 @@ export const CHARTERS: readonly {
   {
     id: "census",
     name: "Opening census",
-    detail: "Mid tax, steady gates, no programs, no automation.",
+    detail: "Mid tax, steady gates, AI levy on, no programs, no automation.",
   },
   {
     id: "safety",
     name: "Safety first",
-    detail: "High tax, a jobless stipend, and public works. No automation.",
+    detail: "High tax, a jobless stipend, public works, and the AI levy. No automation.",
   },
   {
     id: "docks",
     name: "Dock statute",
-    detail: "Low tax, open gates, freight automation staged. No stipend.",
+    detail: "Low tax, open gates, AI levy on, freight automation staged. No stipend.",
   },
 ];
 
@@ -1108,6 +1108,12 @@ const NEUTRAL: Policies = {
   aiLevy: false,
   police: "normal",
 };
+
+/**
+ * Rules a new game opens with: the neutral rules plus the AI levy, which players switch off to opt out.
+ * NEUTRAL stays levy-free because older saves that never had the field fall back to it.
+ */
+const OPENING_POLICIES: Policies = { ...NEUTRAL, aiLevy: true };
 
 const OPEN_EMPLOYED = SECTORS.reduce((sum, sector) => sum + sector.baseSlots, 0);
 const OPEN_LF = Math.round(BASE_POP * PARTICIPATION);
@@ -1143,12 +1149,12 @@ export function freshTechs(): Record<TechId, TechState> {
 
 function policiesFor(charter: CharterId): Policies {
   if (charter === "safety") {
-    return { ...NEUTRAL, tax: "high", stipend: true, works: true };
+    return { ...OPENING_POLICIES, tax: "high", stipend: true, works: true };
   }
   if (charter === "docks") {
-    return { ...NEUTRAL, tax: "low", gates: "open" };
+    return { ...OPENING_POLICIES, tax: "low", gates: "open" };
   }
-  return { ...NEUTRAL };
+  return { ...OPENING_POLICIES };
 }
 
 function techsFor(charter: CharterId): Record<TechId, TechState> {
@@ -1910,6 +1916,7 @@ function openingBulletin(charter: CharterId, census: Project): string {
 export function openingState(charter: CharterId = "census"): Ledger {
   const census = project({
     pop: BASE_POP,
+    // The census is the city before any rule bites, so the opening figures stay the same with or without the levy.
     policies: NEUTRAL,
     techs: freshTechs(),
     year: 1,
@@ -1972,7 +1979,7 @@ export function openingState(charter: CharterId = "census"): Ledger {
     },
     history: [],
     events: [],
-    enacted: { ...NEUTRAL },
+    enacted: { ...OPENING_POLICIES },
     enactedTech: blankTechFlags(),
     shadow: null,
     pace: null,

@@ -69,7 +69,8 @@ test("city or resident ownership and the AI levy slow firm adoption", () => {
 });
 
 test("a do-nothing city sees firm AI take jobs without any player automation", () => {
-  const run = years(openingState(), 25);
+  // With the default levy switched off, so firms adopt at full pace.
+  const run = years(openingState(), 25, (s) => withPolicies(s, { aiLevy: false }));
   const end = run[run.length - 1]!;
   assert.ok(end.ai.adoption.office > 0.3);
   assert.ok(end.jobs.aiJobs > 1000, `ai jobs ${end.jobs.aiJobs}`);
@@ -230,4 +231,43 @@ test("an old save without the office sector or new policies loads without NaN", 
     assert.ok(Number.isFinite(state.jobs.youthUnemployment));
     assert.ok(Number.isFinite(state.ai.adoption.office));
   }
+});
+
+test("new games open with the AI levy on, in force from the start, and it can be switched off", () => {
+  for (const charter of ["census", "safety", "docks"] as const) {
+    const fresh = openingState(charter);
+    assert.equal(fresh.policies.aiLevy, true, charter);
+    assert.equal(fresh.enacted.aiLevy, true, charter);
+  }
+  const fresh = openingState();
+  const year2 = advance(fresh);
+  // Not logged as a new statute: it was the opening rule.
+  assert.ok(!year2.events.some((e) => e.label.startsWith("AI levy")));
+  assert.equal(year2.policies.aiLevy, true);
+  // Opting out takes effect at the next close and is logged.
+  const off = advance(withPolicies(year2, { aiLevy: false }));
+  assert.equal(off.policies.aiLevy, false);
+  assert.ok(off.events.some((e) => e.label === "AI levy ended"));
+  // The levy halves firms' own adoption pace.
+  const withLevy = years(fresh, 15);
+  const without = years(fresh, 15, (s) => withPolicies(s, { aiLevy: false }));
+  assert.ok(withLevy[15]!.ai.adoption.office < without[15]!.ai.adoption.office * 0.75);
+});
+
+test("saves keep their levy setting; saves from before the levy load with it off", () => {
+  const base = advance(openingState());
+  const off = JSON.parse(JSON.stringify(withPolicies(base, { aiLevy: false }))) as Record<string, unknown>;
+  assert.equal(reviveLedger(off)?.policies.aiLevy, false);
+  const on = JSON.parse(JSON.stringify(base)) as Record<string, unknown>;
+  assert.equal(reviveLedger(on)?.policies.aiLevy, true);
+  const old = JSON.parse(JSON.stringify(base)) as Record<string, unknown>;
+  const policies = { ...(old.policies as Record<string, unknown>) };
+  delete policies.aiLevy;
+  old.policies = policies;
+  const enacted = { ...(old.enacted as Record<string, unknown>) };
+  delete enacted.aiLevy;
+  old.enacted = enacted;
+  const revived = reviveLedger(old);
+  assert.equal(revived?.policies.aiLevy, false);
+  assert.equal(revived?.enacted.aiLevy, false);
 });

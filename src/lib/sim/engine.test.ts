@@ -462,7 +462,8 @@ test("opening census starts at a 100 price index and 2% inflation", () => {
 test("a quiet city stays near 2% inflation without a stability shock", () => {
   const path = run(openingState(), 10);
   const rates = path.slice(1).map((state) => state.inflation);
-  assert.ok(rates.every((rate) => rate > 0 && rate < 0.04), `quiet inflation ${rates}`);
+  // The AI levy, on by default, trims the deficit a little, so one quiet year can dip just below zero.
+  assert.ok(rates.every((rate) => rate > -0.005 && rate < 0.04), `quiet inflation ${rates}`);
   assert.ok(rates.some((rate) => rate >= 0.01 && rate <= 0.03));
   const last = path[path.length - 1]!;
   assert.ok(last.stability >= 60, `quiet stability ${last.stability}`);
